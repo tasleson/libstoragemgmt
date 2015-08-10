@@ -7,4 +7,4 @@ http://libstorage.github.io/libstoragemgmt-doc/
 Developers can look here:
 http://libstorage.github.io/libstoragemgmt-doc/doc/lib_dev_guide.html
 
-Note: This branch will be deleted as it's being used for testing!
+Note: This branch will be deleted as it's being used for CI testing!
