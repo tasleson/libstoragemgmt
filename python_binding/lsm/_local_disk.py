@@ -124,6 +124,8 @@ class LocalDisk(object):
                     Invalid disk_path. Should be like '/dev/sdb'.
                 ErrorNumber.NOT_FOUND_DISK
                     Provided disk is not found.
+                ErrorNumber.NO_SUPPORT
+                    Not supported.
         Capability:
             N/A
                 No capability required as this is a library level method.
@@ -170,7 +172,7 @@ class LocalDisk(object):
         Usage:
             Query the disk link type of given disk path.
             For SATA disks connected to SAS enclosure, will return
-            lsm.SCSI.LINK_TYPE_ATA.
+            lsm.Disk.LINK_TYPE_ATA.
             Require permission to open disk_path(root user or disk group).
         Parameters:
             disk_path (string)

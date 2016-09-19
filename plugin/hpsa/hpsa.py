@@ -74,7 +74,7 @@ def _sys_status_of(hp_ctrl_status):
                 status = System.STATUS_OK
             else:
                 status = System.STATUS_OTHER
-            status_info += hp_ctrl_status[key_name]
+            status_info += 'status=[%s]' % str(hp_ctrl_status[key_name])
 
     return status, status_info
 
@@ -321,7 +321,8 @@ def _sys_id_of_ctrl_data(ctrl_data):
 
 class SmartArray(IPlugin):
     _DEFAULT_BIN_PATHS = [
-        "/usr/sbin/hpssacli", "/opt/hp/hpssacli/bld/hpssacli"]
+        "/usr/sbin/hpssacli", "/opt/hp/hpssacli/bld/hpssacli",
+        "/usr/sbin/ssacli", "/opt/hp/hpssacli/bld/ssacli"]
 
     def __init__(self):
         self._sacli_bin = None
@@ -384,30 +385,33 @@ class SmartArray(IPlugin):
                 ErrorNumber.NOT_FOUND_SYSTEM,
                 "System not found")
         cap = Capabilities()
-        cap.set(Capabilities.VOLUMES)
         cap.set(Capabilities.DISKS)
-        cap.set(Capabilities.VOLUME_RAID_INFO)
-        cap.set(Capabilities.POOL_MEMBER_INFO)
-        cap.set(Capabilities.VOLUME_RAID_CREATE)
-        cap.set(Capabilities.VOLUME_DELETE)
-        cap.set(Capabilities.VOLUME_ENABLE)
         cap.set(Capabilities.SYS_FW_VERSION_GET)
         cap.set(Capabilities.SYS_MODE_GET)
-        cap.set(Capabilities.SYS_READ_CACHE_PCT_UPDATE)
         cap.set(Capabilities.SYS_READ_CACHE_PCT_GET)
         cap.set(Capabilities.DISK_LOCATION)
-        cap.set(Capabilities.VOLUME_LED)
+        cap.set(Capabilities.DISK_VPD83_GET)
         cap.set(Capabilities.BATTERIES)
-        cap.set(Capabilities.VOLUME_CACHE_INFO)
-        cap.set(Capabilities.VOLUME_PHYSICAL_DISK_CACHE_UPDATE)
-        cap.set(Capabilities.VOLUME_PHYSICAL_DISK_CACHE_UPDATE_SYSTEM_LEVEL)
-        cap.set(Capabilities.VOLUME_WRITE_CACHE_POLICY_UPDATE_WRITE_BACK)
-        cap.set(Capabilities.VOLUME_WRITE_CACHE_POLICY_UPDATE_AUTO)
-        cap.set(Capabilities.VOLUME_WRITE_CACHE_POLICY_UPDATE_WRITE_THROUGH)
-        cap.set(Capabilities.VOLUME_WRITE_CACHE_POLICY_UPDATE_WB_IMPACT_OTHER)
-        cap.set(Capabilities.VOLUME_WRITE_CACHE_POLICY_UPDATE_IMPACT_READ)
-        cap.set(Capabilities.VOLUME_READ_CACHE_POLICY_UPDATE)
-        cap.set(Capabilities.VOLUME_READ_CACHE_POLICY_UPDATE_IMPACT_WRITE)
+        if system.read_cache_pct >= 0:
+            cap.set(Capabilities.SYS_READ_CACHE_PCT_UPDATE)
+        if system.mode != System.MODE_HBA:
+            cap.set(Capabilities.POOL_MEMBER_INFO)
+            cap.set(Capabilities.VOLUME_RAID_INFO)
+            cap.set(Capabilities.VOLUMES)
+            cap.set(Capabilities.VOLUME_LED)
+            cap.set(Capabilities.VOLUME_RAID_CREATE)
+            cap.set(Capabilities.VOLUME_DELETE)
+            cap.set(Capabilities.VOLUME_ENABLE)
+            cap.set(Capabilities.VOLUME_CACHE_INFO)
+            cap.set(Capabilities.VOLUME_PHYSICAL_DISK_CACHE_UPDATE)
+            cap.set(Capabilities.VOLUME_PHYSICAL_DISK_CACHE_UPDATE_SYSTEM_LEVEL)
+            cap.set(Capabilities.VOLUME_WRITE_CACHE_POLICY_UPDATE_WRITE_BACK)
+            cap.set(Capabilities.VOLUME_WRITE_CACHE_POLICY_UPDATE_AUTO)
+            cap.set(Capabilities.VOLUME_WRITE_CACHE_POLICY_UPDATE_WRITE_THROUGH)
+            cap.set(Capabilities.VOLUME_WRITE_CACHE_POLICY_UPDATE_WB_IMPACT_OTHER)
+            cap.set(Capabilities.VOLUME_WRITE_CACHE_POLICY_UPDATE_IMPACT_READ)
+            cap.set(Capabilities.VOLUME_READ_CACHE_POLICY_UPDATE)
+            cap.set(Capabilities.VOLUME_READ_CACHE_POLICY_UPDATE_IMPACT_WRITE)
 
         return cap
 
@@ -467,17 +471,16 @@ class SmartArray(IPlugin):
             else:
                 # Some Smart Arrays don't have cache
                 # This entry is also missing until a volume uses cache
-                read_cache_pct = System.CACHE_PCT_UNKNOWN
+                read_cache_pct = System.READ_CACHE_PCT_UNKNOWN
             if 'Controller Mode' in ctrl_data:
                 hwraid_mode = ctrl_data['Controller Mode']
-                if hwraid_mode == 'RAID':
+                if 'RAID' in hwraid_mode:
                     mode = System.MODE_HARDWARE_RAID
-                elif hwraid_mode == 'HBA':
+                elif 'HBA' in hwraid_mode:
                     mode = System.MODE_HBA
                 else:
-                    raise LsmError(
-                        ErrorNumber.PLUGIN_BUG,
-                        "Invalid Controller Mode: '%s'" % hwraid_mode)
+                    mode = System.MODE_UNKNOWN
+                    status_info += ' mode=[%s]' % str(hwraid_mode)
             else:
                 # prior to late Gen8, all Smart Arrays were RAID mode only
                 mode = System.MODE_HARDWARE_RAID
@@ -575,15 +578,22 @@ class SmartArray(IPlugin):
         # No document or command output indicate block size
         # of volume. So we try to read from linux kernel, if failed
         # try 512 and roughly calculate the sector count.
-        device = Device.from_device_file(_CONTEXT, hp_ld['Disk Name'])
-        vol_name = "%s: /dev/%s" % (hp_ld_name, device.sys_name)
-        attributes = device.attributes
-        try:
-            block_size = attributes.asint("queue/logical_block_size")
-            num_of_blocks = attributes.asint("size")
-        except (KeyError, UnicodeDecodeError, ValueError):
-            block_size = 512
-            num_of_blocks = int(_hp_size_to_lsm(hp_ld['Size']) / block_size)
+        block_size = 512
+        num_of_blocks = int(_hp_size_to_lsm(hp_ld['Size']) / block_size)
+        vol_name = hp_ld_name
+
+        if len(vpd83) > 0:
+            blk_paths = LocalDisk.vpd83_search(vpd83)
+            if len(blk_paths) > 0:
+                blk_path = blk_paths[0]
+                vol_name += ": %s" % " ".join(blk_paths)
+                device = Device.from_device_file(_CONTEXT, blk_path)
+                attributes = device.attributes
+                try:
+                    block_size = attributes.asint("queue/logical_block_size")
+                    num_of_blocks = attributes.asint("size")
+                except (KeyError, UnicodeDecodeError, ValueError):
+                    pass
 
         if 'Failed' in hp_ld['Status']:
             admin_status = Volume.ADMIN_STATE_DISABLED

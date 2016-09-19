@@ -210,6 +210,8 @@ Value disk_to_value(lsm_disk * disk)
             d["rpm"] = Value(disk->rpm);
         if (disk->link_type != LSM_DISK_LINK_TYPE_NO_SUPPORT)
             d["link_type"] = Value(disk->link_type);
+        if (disk->vpd83 != NULL)
+            d["vpd83"] = Value(disk->vpd83);
 
         return Value(d);
     }
@@ -708,8 +710,18 @@ Value nfs_export_to_value(lsm_nfs_export * exp)
         f["root"] = Value(string_list_to_value(exp->root));
         f["rw"] = Value(string_list_to_value(exp->read_write));
         f["ro"] = Value(string_list_to_value(exp->read_only));
-        f["anonuid"] = Value(exp->anon_uid);
-        f["anongid"] = Value(exp->anon_gid);
+        if (exp->anon_uid == UINT64_MAX)
+            f["anonuid"] = Value(-1);
+        else if (exp->anon_uid == UINT64_MAX - 1)
+            f["anonuid"] = Value(-2);
+        else
+            f["anonuid"] = Value(exp->anon_uid);
+        if (exp->anon_gid == UINT64_MAX)
+            f["anongid"] = Value(-1);
+        else if (exp->anon_gid == UINT64_MAX - 1)
+            f["anongid"] = Value(-2);
+        else
+            f["anongid"] = Value(exp->anon_gid);
         f["options"] = Value(exp->options);
         f["plugin_data"] = Value(exp->plugin_data);
         return Value(f);

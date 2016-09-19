@@ -2380,8 +2380,18 @@ int lsm_nfs_export_fs(lsm_connect * c,
     p["root_list"] = string_list_to_value(root_list);
     p["rw_list"] = string_list_to_value(rw_list);
     p["ro_list"] = string_list_to_value(ro_list);
-    p["anon_uid"] = Value(anon_uid);
-    p["anon_gid"] = Value(anon_gid);
+    if ((int64_t) anon_uid == LSM_NFS_EXPORT_ANON_UID_GID_NA)
+        p["anon_uid"] = Value(LSM_NFS_EXPORT_ANON_UID_GID_NA);
+    else if ((int64_t) anon_uid == LSM_NFS_EXPORT_ANON_UID_GID_ERROR)
+        p["anon_uid"] = Value(LSM_NFS_EXPORT_ANON_UID_GID_ERROR);
+    else
+        p["anon_uid"] = Value(anon_uid);
+    if ((int64_t) anon_gid == LSM_NFS_EXPORT_ANON_UID_GID_NA)
+        p["anon_gid"] = Value(LSM_NFS_EXPORT_ANON_UID_GID_NA);
+    else if ((int64_t) anon_gid == LSM_NFS_EXPORT_ANON_UID_GID_ERROR)
+        p["anon_gid"] = Value(LSM_NFS_EXPORT_ANON_UID_GID_ERROR);
+    else
+        p["anon_gid"] = Value(anon_gid);
     p["auth_type"] = Value(auth_type);
     p["options"] = Value(options);
     p["flags"] = Value(flags);
@@ -2600,6 +2610,19 @@ int lsm_system_read_cache_pct_update(lsm_connect * c, lsm_system * system,
                                      uint32_t read_pct, lsm_flag flags)
 {
     CONN_SETUP(c);
+
+    if (!LSM_IS_SYSTEM(system))
+        return log_exception(c, LSM_ERR_INVALID_ARGUMENT,
+                             "Invalid argument: system", NULL);
+
+    if (LSM_FLAG_UNUSED_CHECK(flags))
+        return log_exception(c, LSM_ERR_INVALID_ARGUMENT,
+                             "Invalid argument: flags", NULL);
+
+    if (read_pct > 100)
+        return log_exception(c, LSM_ERR_INVALID_ARGUMENT,
+                             "Invalid argument: read_pct, "
+                             "should >=0 and <= 100", NULL);
 
     std::map < std::string, Value > p;
     p["flags"] = Value(flags);

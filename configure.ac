@@ -3,7 +3,7 @@ dnl Copyright (C) 2011-2016 Red Hat, Inc.
 dnl See COPYING.LIB for the License of this software
 
 AC_INIT(
-    [libstoragemgmt], [1.3.2], [libstoragemgmt-devel@lists.fedorahosted.org],
+    [libstoragemgmt], [1.3.4], [libstoragemgmt-devel@lists.fedorahosted.org],
     [], [https://github.com/libstorage/libstoragemgmt/])
 AC_CONFIG_SRCDIR([configure.ac])
 AC_CONFIG_AUX_DIR([build-aux])
@@ -101,6 +101,8 @@ AC_CHECK_HEADERS([dlfcn.h])
 #Check for openssl development libs, we are using in simc_lsmplugin
 AC_CHECK_LIB([crypto], [MD5_Final], [SSL_LIBS=-lcrypto], AC_MSG_ERROR([Missing openssl-devel libraries]))
 AC_SUBST([SSL_LIBS])
+#Check for sqlite development libs for simc_lsmplugin
+PKG_CHECK_MODULES([SQLITE3], [sqlite3])
 
 #Check for json parser yajl
 AC_CHECK_HEADERS([yajl/yajl_gen.h yajl/yajl_parse.h], [] , AC_MSG_ERROR([Missing yajl development headers]) )

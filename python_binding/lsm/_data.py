@@ -1,4 +1,5 @@
 # Copyright (C) 2011-2016 Red Hat, Inc.
+# (C) Copyright 2016 Hewlett Packard Enterprise Development LP
 # This library is free software; you can redistribute it and/or
 # modify it under the terms of the GNU Lesser General Public
 # License as published by the Free Software Foundation; either
@@ -14,6 +15,7 @@
 #
 # Author: tasleson
 #         Gris Ge <fge@redhat.com>
+#         Joe Handzik <joseph.t.handzik@hpe.com>
 
 from abc import ABCMeta as _ABCMeta
 import re

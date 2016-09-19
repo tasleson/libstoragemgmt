@@ -998,7 +998,7 @@ class CmdLine:
     def alias_help_text():
         rc = "command aliases:\n"
         for k, v in sorted(aliases.items()):
-            rc += "   {:<18}   Alias of '{}'\n".format(k, v)
+            rc += "   {0:<18}   Alias of '{1}'\n".format(k, v)
         return rc
 
 
@@ -1645,6 +1645,8 @@ class CmdLine:
         read_pct = int(args.read_pct)
 
         self.c.system_read_cache_pct_update(lsm_system, read_pct)
+        lsm_system = _get_item(self.c.systems(), args.sys, "System")
+        self.display_data([lsm_system])
 
     ## Displays file system dependants
     def fs_dependants(self, args):
@@ -1780,13 +1782,17 @@ class CmdLine:
     def local_disk_list(self, args):
         local_disks = []
         for disk_path in LocalDisk.list():
+            vpd83 = ""
+            rpm = Disk.RPM_NO_SUPPORT
+            link_type = Disk.LINK_TYPE_NO_SUPPORT
             try:
                 vpd83 = LocalDisk.vpd83_get(disk_path)
+                rpm = LocalDisk.rpm_get(disk_path)
+                link_type = LocalDisk.link_type_get(disk_path)
             except LsmError as lsm_err:
-                vpd83 = ""
+                if lsm_err.code != ErrorNumber.NO_SUPPORT:
+                    raise
 
-            rpm = LocalDisk.rpm_get(disk_path)
-            link_type = LocalDisk.link_type_get(disk_path)
             local_disks.append(
                 LocalDiskInfo(disk_path, vpd83, rpm, link_type))
 
