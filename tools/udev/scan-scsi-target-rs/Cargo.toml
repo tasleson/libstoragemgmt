@@ -1,0 +1,10 @@
+[package]
+name = "scan-scsi-target"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+description = "Scan a SCSI target given a uevent DEVPATH"
+
+[[bin]]
+name = "scan-scsi-target"
+path = "src/main.rs"
