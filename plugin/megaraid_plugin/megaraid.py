@@ -459,11 +459,17 @@ class MegaRAID(IPlugin):
 
             rc_status = ctrl_output[0].get('Command Status')
             if rc_status.get('Status') != 'Success':
-                detail_status = rc_status['Detailed Status'][0]
+                detail_status_list = rc_status.get('Detailed Status')
+                if detail_status_list:
+                    detail_status = detail_status_list[0]
+                    raise LsmError(
+                        ErrorNumber.PLUGIN_BUG,
+                        "MegaRAID storcli failed with error %d: %s" %
+                        (detail_status['ErrCd'], detail_status['ErrMsg']))
                 raise LsmError(
                     ErrorNumber.PLUGIN_BUG,
-                    "MegaRAID storcli failed with error %d: %s" %
-                    (detail_status['ErrCd'], detail_status['ErrMsg']))
+                    "MegaRAID storcli failed: %s" %
+                    rc_status.get('Description', 'Unknown error'))
             real_data = ctrl_output[0].get('Response Data', {})
             if real_data and 'Response Data' in list(real_data.keys()):
                 return real_data['Response Data']
@@ -482,14 +488,18 @@ class MegaRAID(IPlugin):
         return ctrl_count
 
     def _lsm_status_of_ctrl(self, ctrl_show_all_output):
-        lsi_status_info = ctrl_show_all_output['Status']
+        lsi_status_info = ctrl_show_all_output.get('Status', {})
         status_info = ''
         status = System.STATUS_UNKNOWN
-        if lsi_status_info['Controller Status'] == 'Optimal':
+        ctrl_status = lsi_status_info.get('Controller Status')
+        if ctrl_status is None:
+            status = System.STATUS_OK
+            return status, status_info
+        if ctrl_status == 'Optimal':
             status = System.STATUS_OK
         else:
             # TODO(Gris Ge): Try pull a disk off to check whether this change.
-            status_info = "%s: " % lsi_status_info['Controller Status']
+            status_info = "%s: " % ctrl_status
             for key_name in list(lsi_status_info.keys()):
                 if key_name == 'Controller Status':
                     continue
@@ -515,9 +525,11 @@ class MegaRAID(IPlugin):
             ctrl_show_all_output = self._storcli_exec(
                 ["/c%d" % ctrl_num, "show", "all"])
             sys_id = self._sys_id_of_ctrl_num(ctrl_num, ctrl_show_all_output)
+            host_interface = ctrl_show_all_output.get(
+                'Bus', {}).get('Host Interface', '')
             sys_name = "%s %s %s" % (
                 ctrl_show_all_output['Basics']['Model'],
-                ctrl_show_all_output['Bus']['Host Interface'],
+                host_interface,
                 ctrl_show_all_output['Basics']['PCI Address'])
             (status,
              status_info) = self._lsm_status_of_ctrl(ctrl_show_all_output)
@@ -693,16 +705,22 @@ class MegaRAID(IPlugin):
         for ctrl_num in range(self._ctrl_count()):
             cc_vd_ids = []
             cc_dg_ids = []
-            dg_show_output = self._storcli_exec(
-                ["/c%d/dall" % ctrl_num, "show", "all"])
-            consist_check_output = self._storcli_exec(
-                ["/c%d/vall" % ctrl_num, "show", "cc"])
+            try:
+                dg_show_output = self._storcli_exec(
+                    ["/c%d/dall" % ctrl_num, "show", "all"])
+            except (ExecError, LsmError):
+                continue
+            try:
+                consist_check_output = self._storcli_exec(
+                    ["/c%d/vall" % ctrl_num, "show", "cc"])
+            except (ExecError, LsmError):
+                consist_check_output = {}
             free_space_list = dg_show_output.get("FREE SPACE DETAILS", [])
 
             if "TOPOLOGY" not in dg_show_output:
                 continue
 
-            for vd_stat in consist_check_output["VD Operation Status"]:
+            for vd_stat in consist_check_output.get("VD Operation Status", []):
                 if vd_stat["Status"] == "In progress":
                     cc_vd_ids.append(int(vd_stat["VD"]))
 
@@ -753,8 +771,11 @@ class MegaRAID(IPlugin):
                 flags=Client.FLAG_RSVD):
         lsm_vols = []
         for ctrl_num in range(self._ctrl_count()):
-            vol_show_output = self._storcli_exec(
-                ["/c%d/vall" % ctrl_num, "show", "all"])
+            try:
+                vol_show_output = self._storcli_exec(
+                    ["/c%d/vall" % ctrl_num, "show", "all"])
+            except (ExecError, LsmError):
+                continue
             sys_id = self._sys_id_of_ctrl_num(ctrl_num)
             if vol_show_output is None or len(vol_show_output) == 0:
                 continue
@@ -1062,7 +1083,7 @@ class MegaRAID(IPlugin):
             try:
                 bbu_show_all_output = self._storcli_exec(
                     ["/c%d/bbu" % ctrl_num, "show", "all"])
-            except ExecError as exec_error:
+            except (ExecError, LsmError):
                 bbu_show_all_output = None
 
             if bbu_show_all_output:
@@ -1072,7 +1093,7 @@ class MegaRAID(IPlugin):
             try:
                 cv_show_all_output = self._storcli_exec(
                     ["/c%d/cv" % ctrl_num, "show", "all"])
-            except ExecError as exec_error:
+            except (ExecError, LsmError):
                 cv_show_all_output = None
 
             if cv_show_all_output:
