@@ -544,10 +544,6 @@ lsm_volume *lsm_volume_record_alloc(const char *id, const char *name,
                                     uint64_t numberOfBlocks, uint32_t status,
                                     const char *system_id, const char *pool_id,
                                     const char *plugin_data) {
-    if (vpd83 && (LSM_ERR_OK != lsm_volume_vpd83_verify(vpd83))) {
-        return NULL;
-    }
-
     lsm_volume *rc = (lsm_volume *)calloc(1, sizeof(lsm_volume));
     if (rc) {
         rc->magic = LSM_VOL_MAGIC;

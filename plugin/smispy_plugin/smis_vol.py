@@ -156,10 +156,7 @@ def _vpd83_of_cim_vol(cim_vol):
     if vpd_83:
         vpd_83 = vpd_83.lower()
 
-    if vpd_83 and Volume.vpd83_verify(vpd_83):
-        return vpd_83
-    else:
-        return ''
+    return vpd_83 if vpd_83 else ''
 
 
 def cim_vol_to_lsm_vol(cim_vol, pool_id, sys_id):
