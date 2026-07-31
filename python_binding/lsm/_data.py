@@ -255,11 +255,6 @@ class Disk(IData):
         self._status = _status
         self._system_id = _system_id
         self._plugin_data = _plugin_data
-        if _vpd83 and not Volume.vpd83_verify(_vpd83):
-            raise LsmError(
-                ErrorNumber.INVALID_ARGUMENT,
-                "Incorrect format of VPD 0x83 NAA(3) string: '%s', "
-                "expecting 32 or 16 hex characters" % _vpd83)
         self._vpd83 = _vpd83
         self._location = _location
         self._rpm = _rpm
@@ -473,11 +468,6 @@ class Volume(IData):
                  _plugin_data=None):
         self._id = _id  # Identifier
         self._name = _name  # Human recognisable name
-        if _vpd83 and not Volume.vpd83_verify(_vpd83):
-            raise LsmError(
-                ErrorNumber.INVALID_ARGUMENT,
-                "Incorrect format of VPD 0x83 NAA(3) string: '%s', "
-                "expecting 32 or 16 hex characters" % _vpd83)
         self._vpd83 = _vpd83  # SCSI page 83 unique ID
         self._block_size = _block_size  # Block size
         self._num_of_blocks = _num_of_blocks  # Number of blocks

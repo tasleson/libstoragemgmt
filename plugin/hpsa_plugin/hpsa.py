@@ -760,7 +760,8 @@ class SmartArray(IPlugin):
         if disk_path:
             vpd83 = LocalDisk.vpd83_get(disk_path)
         else:
-            vpd83 = ''
+            unique_id = hp_disk.get('Drive Unique ID', '').strip()
+            vpd83 = unique_id.lower() if unique_id else ''
 
         # If we cannot retrieve the disk name, the RPM is missing.  However,
         # 'Rotational Speed' is also missing when we have a functional device
