@@ -26,6 +26,14 @@ def cmd_exec(cmds):
     return str_stdout
 
 
+def select_disk_model(attr_dict):
+    """Select disk model from storcli device attributes.
+
+    NVMe drives use 'Model Number'; SAS/SATA use 'Model'.
+    """
+    return (attr_dict.get('Model Number') or attr_dict.get('Model', ''))
+
+
 class ExecError(Exception):
 
     def __init__(self, cmd, errno, stdout, stderr, *args, **kwargs):
