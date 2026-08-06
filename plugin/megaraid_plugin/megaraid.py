@@ -16,7 +16,7 @@ from lsm import (uri_parse, search_property, size_human_2_size_bytes,
                  Capabilities, LsmError, ErrorNumber, System, Client, Disk,
                  VERSION, IPlugin, Pool, Volume, Battery, int_div)
 
-from megaraid_plugin.utils import cmd_exec, ExecError
+from megaraid_plugin.utils import cmd_exec, ExecError, select_disk_model
 
 # Naming scheme
 #   mega_sys_path   /c0
@@ -599,10 +599,10 @@ class MegaRAID(IPlugin):
                     'Drive %s State' % mega_disk_path]
 
                 disk_id = disk_show_attr_dict['SN'].strip()
+                disk_model = select_disk_model(disk_show_attr_dict)
                 disk_name = "Disk %s %s %s" % (
                     disk_show_basic_dict['DID'],
-                    disk_show_attr_dict['Manufacturer Id'].strip(),
-                    disk_show_attr_dict['Model Number'])
+                    disk_show_attr_dict['Manufacturer Id'].strip(), disk_model)
                 disk_type = _disk_type_of(disk_show_basic_dict)
                 blk_size = size_human_2_size_bytes(
                     disk_show_basic_dict['SeSz'])

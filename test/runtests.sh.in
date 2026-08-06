@@ -36,6 +36,10 @@ echo "src_dir = ${src_dir}"
 echo "Starting in dir =  $(pwd)"
 
 
+# Standalone Python unit tests (no daemon, no C extension required)
+echo "Running standalone Python unit tests"
+_good python3 -m pytest "${src_dir}/test/test_megaraid.py" -v
+
 # Fetch and test the golang module to ensure we didn't break it
 arch=$(uname -m)
 if [ "CHK${arch}" != "CHKppc64" ] && [ "${src_dir}" == "${build_dir}" ] && [ "$EUID" -eq 0 ] ; then
