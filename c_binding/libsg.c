@@ -138,6 +138,45 @@ const char *const _T10_SPC_SENSE_KEY_STR[] = {
 #define _SG_IO_SEND_DATA 1
 #define _SG_IO_RECV_DATA 2
 
+/* SAM-5 rev 21 Table 41 - Status codes.
+ * <scsi/scsi.h> also defines these but pre-shifted for masked_status, which
+ * is not what sg_io_hdr.status nor sg_io_v4.device_status carry.
+ */
+#define _T10_SAM_STATUS_GOOD            0x00
+#define _T10_SAM_STATUS_CHECK_CONDITION 0x02
+
+/* Linux SCSI mid-layer driver_status values. Only <scsi/sg_io_linux.h> from
+ * sg3_utils exports these and we do not want that build dependency.
+ */
+#define _LINUX_DRIVER_SENSE 0x08
+#define _LINUX_DRIVER_MASK  0x0f
+
+/* _sg_io_v3()/_sg_io_v4() return this when the command did not run to
+ * completion. It is a plain errno so the existing caller error paths keep
+ * working; '*completed' is what tells them the difference.
+ */
+#define _SG_IO_INCOMPLETE_ERRNO EIO
+
+/* Room for the short fixed form text _sg_io_err_str() produces, kept well
+ * under _LSM_ERR_MSG_LEN so it can be combined with a sense description.
+ */
+#define _SG_IO_ERR_STR_LEN 256
+
+/*
+ * What SG_IO said about a command besides the data it returned. The raw
+ * status bytes are carried out because they are the whole diagnosis when a
+ * command does not complete: a timeout, a target that went away and an
+ * adapter fault all land here and want different things done about them.
+ * The v4 names differ; transport_status and device_status are stored in
+ * host_status and scsi_status respectively.
+ */
+struct _sg_io_status {
+    bool completed;
+    uint32_t host_status;
+    uint32_t driver_status;
+    uint32_t scsi_status;
+};
+
 #pragma pack(push, 1)
 /*
  * SPC-5 rev 7 Table 589 - Device Identification VPD page
@@ -328,18 +367,51 @@ struct _sg_t10_ata_pass_through_12_cdb {
  * Return 0 if pass, return -1 means got sense_data, return errno of ioctl
  * error if ioctl failed.
  * The 'sense_data' should be uint8_t[_T10_SPC_SENSE_DATA_MAX_LENGTH].
+ * '*completed' is set false when the adapter, the SCSI mid layer or the SCSI
+ * status says the command never ran to completion. The return value is then
+ * _SG_IO_INCOMPLETE_ERRNO and any receive buffer holds nothing from the
+ * device.
  */
 static int _sg_io_v3(int fd, uint8_t *cdb, uint8_t cdb_len, uint8_t *data,
-                     ssize_t data_len, uint8_t *sense_data, int direction);
+                     ssize_t data_len, uint8_t *sense_data, int direction,
+                     struct _sg_io_status *io_status);
 
 /*
- * For SG_IO v4 BSG only.
- * Return 0 if pass, return -1 means got sense_data, return errno of ioctl
- * error if ioctl failed.
- * The 'sense_data' should be uint8_t[_T10_SPC_SENSE_DATA_MAX_LENGTH].
+ * For SG_IO v4 BSG only. Same contract as _sg_io_v3().
  */
 static int _sg_io_v4(int fd, uint8_t *cdb, uint8_t cdb_len, uint8_t *data,
-                     ssize_t data_len, uint8_t *sense_data, int direction);
+                     ssize_t data_len, uint8_t *sense_data, int direction,
+                     struct _sg_io_status *io_status);
+
+/*
+ * Record what SG_IO v3 reported about a command, including whether it reached
+ * the device and ran. Split out from _sg_io_v3() so it can be exercised
+ * without a device.
+ * Preconditions:
+ *  io_hdr != NULL
+ *  io_status != NULL
+ */
+static void _sg_io_v3_status_get(struct sg_io_hdr *io_hdr,
+                                 struct _sg_io_status *io_status);
+
+/*
+ * As _sg_io_v3_status_get() but for SG_IO v4.
+ * Preconditions:
+ *  io_hdr != NULL
+ *  io_status != NULL
+ */
+static void _sg_io_v4_status_get(struct sg_io_v4 *io_hdr,
+                                 struct _sg_io_status *io_status);
+
+/*
+ * Render an _sg_io_v3()/_sg_io_v4() return value for an error message. The -1
+ * meaning "got sense data" is not an errno and must not reach strerror().
+ * Preconditions:
+ *  out is char[_SG_IO_ERR_STR_LEN]
+ */
+static const char *_sg_io_err_str(int ioctl_errno,
+                                  const struct _sg_io_status *io_status,
+                                  char *out);
 
 static struct _sg_t10_vpd83_dp *_sg_t10_vpd83_dp_new(void);
 
@@ -398,13 +470,109 @@ static int _sense_data_asc_get(uint8_t *sense_data, uint8_t *asc);
 static int _info_excep_log_asc_get(char *err_msg, uint8_t *log_data,
                                    uint16_t log_data_len, uint8_t *asc);
 
+static void _sg_io_v3_status_get(struct sg_io_hdr *io_hdr,
+                                 struct _sg_io_status *io_status) {
+    uint8_t driver_status = 0;
+
+    assert(io_hdr != NULL);
+    assert(io_status != NULL);
+
+    io_status->host_status = io_hdr->host_status;
+    io_status->driver_status = io_hdr->driver_status;
+    io_status->scsi_status = io_hdr->status;
+
+    /* host_status is the adapter's verdict and driver_status the mid layer's.
+     * Either one set means the command did not get through, so nothing in the
+     * data buffer can be trusted. DRIVER_SENSE is the exception: it only says
+     * sense data is present, which the sense path below deals with.
+     */
+    driver_status = io_hdr->driver_status & _LINUX_DRIVER_MASK;
+    if ((io_hdr->host_status != 0) ||
+        ((driver_status != 0) && (driver_status != _LINUX_DRIVER_SENSE))) {
+        io_status->completed = false;
+        return;
+    }
+
+    if (io_hdr->sb_len_wr != 0) {
+        /* Sense data explains a CHECK CONDITION, so the command did run. */
+        io_status->completed = true;
+        return;
+    }
+
+    /* A CHECK CONDITION with no sense data to go with it, or a status like
+     * BUSY or RESERVATION CONFLICT, still means we have no answer.
+     */
+    io_status->completed = io_hdr->status == _T10_SAM_STATUS_GOOD;
+}
+
+static void _sg_io_v4_status_get(struct sg_io_v4 *io_hdr,
+                                 struct _sg_io_status *io_status) {
+    uint32_t driver_status = 0;
+
+    assert(io_hdr != NULL);
+    assert(io_status != NULL);
+
+    io_status->host_status = io_hdr->transport_status;
+    io_status->driver_status = io_hdr->driver_status;
+    io_status->scsi_status = io_hdr->device_status;
+
+    driver_status = io_hdr->driver_status & _LINUX_DRIVER_MASK;
+    if ((io_hdr->transport_status != 0) ||
+        ((driver_status != 0) && (driver_status != _LINUX_DRIVER_SENSE))) {
+        io_status->completed = false;
+        return;
+    }
+
+    if (io_hdr->response_len != 0) {
+        io_status->completed = true;
+        return;
+    }
+
+    io_status->completed = io_hdr->device_status == _T10_SAM_STATUS_GOOD;
+}
+
+static const char *_sg_io_err_str(int ioctl_errno,
+                                  const struct _sg_io_status *io_status,
+                                  char *out) {
+    char strerr_buff[_LSM_ERR_MSG_LEN];
+
+    assert(io_status != NULL);
+    assert(out != NULL);
+
+    if (ioctl_errno == -1) {
+        snprintf(out, _SG_IO_ERR_STR_LEN, "SCSI sense data");
+    } else if (!io_status->completed) {
+        /* The raw bytes are the diagnosis here. host status 0x03 is a
+         * timeout, 0x04 a target that did not answer, and so on; without them
+         * there is nothing to act on.
+         */
+        snprintf(out, _SG_IO_ERR_STR_LEN,
+                 "error %d(%s), command did not complete: host status "
+                 "0x%02" PRIx32 ", driver status 0x%02" PRIx32
+                 ", SCSI status 0x%02" PRIx32,
+                 ioctl_errno,
+                 error_to_str(ioctl_errno, strerr_buff, _LSM_ERR_MSG_LEN),
+                 io_status->host_status, io_status->driver_status,
+                 io_status->scsi_status);
+    } else {
+        snprintf(out, _SG_IO_ERR_STR_LEN, "error %d(%s)", ioctl_errno,
+                 error_to_str(ioctl_errno, strerr_buff, _LSM_ERR_MSG_LEN));
+    }
+    return out;
+}
+
 static int _sg_io_v3(int fd, uint8_t *cdb, uint8_t cdb_len, uint8_t *data,
-                     ssize_t data_len, uint8_t *sense_data, int direction) {
+                     ssize_t data_len, uint8_t *sense_data, int direction,
+                     struct _sg_io_status *io_status) {
     int rc = 0;
     struct sg_io_hdr io_hdr;
 
     assert(cdb != NULL);
     assert(cdb_len != 0);
+    assert(io_status != NULL);
+
+    memset(io_status, 0, sizeof(struct _sg_io_status));
+    io_status->completed = true;
 
     memset(&io_hdr, 0, sizeof(struct sg_io_hdr));
     memset(sense_data, 0, _T10_SPC_SENSE_DATA_MAX_LENGTH);
@@ -427,26 +595,36 @@ static int _sg_io_v3(int fd, uint8_t *cdb, uint8_t cdb_len, uint8_t *data,
     io_hdr.dxfer_len = data_len;
     io_hdr.timeout = _SG_IO_TMO;
 
-    if (ioctl(fd, SG_IO, &io_hdr) != 0)
+    if (ioctl(fd, SG_IO, &io_hdr) != 0) {
         rc = errno;
+    } else {
+        _sg_io_v3_status_get(&io_hdr, io_status);
+        if (!io_status->completed)
+            rc = _SG_IO_INCOMPLETE_ERRNO;
+        else if (io_hdr.sb_len_wr != 0)
+            /* It might possible we got "NO SENSE", so we does not zero the
+             * data */
+            return -1;
+    }
 
-    if (io_hdr.sb_len_wr != 0)
-        /* It might possible we got "NO SENSE", so we does not zero the data */
-        return -1;
-
-    if ((rc != 0) && (data != NULL))
+    if ((rc != 0) && (data != NULL) && (direction == _SG_IO_RECV_DATA))
         memset(data, 0, (size_t)data_len);
 
     return rc;
 }
 
 static int _sg_io_v4(int fd, uint8_t *cdb, uint8_t cdb_len, uint8_t *data,
-                     ssize_t data_len, uint8_t *sense_data, int direction) {
+                     ssize_t data_len, uint8_t *sense_data, int direction,
+                     struct _sg_io_status *io_status) {
     int rc = 0;
     struct sg_io_v4 io_hdr;
 
     assert(cdb != NULL);
     assert(cdb_len != 0);
+    assert(io_status != NULL);
+
+    memset(io_status, 0, sizeof(struct _sg_io_status));
+    io_status->completed = true;
 
     memset(&io_hdr, 0, sizeof(struct sg_io_v4));
     memset(sense_data, 0, _T10_SPC_SENSE_DATA_MAX_LENGTH);
@@ -471,14 +649,19 @@ static int _sg_io_v4(int fd, uint8_t *cdb, uint8_t cdb_len, uint8_t *data,
     }
     io_hdr.timeout = _SG_IO_TMO;
 
-    if (ioctl(fd, SG_IO, &io_hdr) != 0)
+    if (ioctl(fd, SG_IO, &io_hdr) != 0) {
         rc = errno;
+    } else {
+        _sg_io_v4_status_get(&io_hdr, io_status);
+        if (!io_status->completed)
+            rc = _SG_IO_INCOMPLETE_ERRNO;
+        else if (io_hdr.response_len != 0)
+            /* It might possible we got "NO SENSE", so we does not zero the
+             * data */
+            return -1;
+    }
 
-    if (io_hdr.response_len != 0)
-        /* It might possible we got "NO SENSE", so we does not zero the data */
-        return -1;
-
-    if ((rc != 0) && (data != NULL))
+    if ((rc != 0) && (data != NULL) && (direction == _SG_IO_RECV_DATA))
         memset(data, 0, (size_t)data_len);
 
     return rc;
@@ -492,8 +675,9 @@ int _sg_io_vpd(char *err_msg, int fd, uint8_t page_code, uint8_t *data,
     uint8_t cdb[_T10_SPC_INQUIRY_CMD_LEN];
     uint8_t sense_data[_T10_SPC_SENSE_DATA_MAX_LENGTH];
     int ioctl_errno = 0;
+    struct _sg_io_status io_status;
     int rc_vpd_00 = 0;
-    char strerr_buff[_LSM_ERR_MSG_LEN];
+    char sg_io_err[_SG_IO_ERR_STR_LEN];
     uint8_t sense_key = _T10_SPC_SENSE_KEY_NO_SENSE;
     char sense_err_msg[_LSM_ERR_MSG_LEN / 2];
     uint16_t alloc_len = 0;
@@ -544,7 +728,7 @@ int _sg_io_vpd(char *err_msg, int fd, uint8_t page_code, uint8_t *data,
      */
 
     ioctl_errno = _sg_io_v3(fd, cdb, _T10_SPC_INQUIRY_CMD_LEN, data, alloc_len,
-                            sense_data, _SG_IO_RECV_DATA);
+                            sense_data, _SG_IO_RECV_DATA, &io_status);
 
     if (ioctl_errno != 0) {
         if (page_code == _SG_T10_SPC_VPD_SUP_VPD_PGS) {
@@ -565,13 +749,13 @@ int _sg_io_vpd(char *err_msg, int fd, uint8_t page_code, uint8_t *data,
                                               page_code) == true) {
                     /* Current VPD page is supported, then it's a library bug */
                     rc = LSM_ERR_LIB_BUG;
-                    _lsm_err_msg_set(err_msg,
-                                     "BUG: VPD page 0x%02x is supported, "
-                                     "but failed with error %d(%s), %s",
-                                     page_code, ioctl_errno,
-                                     error_to_str(ioctl_errno, strerr_buff,
-                                                  _LSM_ERR_MSG_LEN),
-                                     sense_err_msg);
+                    _lsm_err_msg_set(
+                        err_msg,
+                        "BUG: VPD page 0x%02x is supported, "
+                        "but failed with %s, %s",
+                        page_code,
+                        _sg_io_err_str(ioctl_errno, &io_status, sg_io_err),
+                        sense_err_msg);
                     goto out;
                 } else {
                     rc = LSM_ERR_NO_SUPPORT;
@@ -598,12 +782,10 @@ int _sg_io_vpd(char *err_msg, int fd, uint8_t page_code, uint8_t *data,
             goto out;
         }
         rc = LSM_ERR_LIB_BUG;
-        _lsm_err_msg_set(
-            err_msg,
-            "BUG: Unexpected failure of _sg_io_vpd(): "
-            "error %d(%s), with no error in SCSI sense data",
-            ioctl_errno,
-            error_to_str(ioctl_errno, strerr_buff, _LSM_ERR_MSG_LEN));
+        _lsm_err_msg_set(err_msg,
+                         "BUG: Unexpected failure of _sg_io_vpd(): "
+                         "%s, with no error in SCSI sense data",
+                         _sg_io_err_str(ioctl_errno, &io_status, sg_io_err));
     } else {
         *data_len = alloc_len;
     }
@@ -983,7 +1165,8 @@ int _sg_io_recv_diag(char *err_msg, int fd, uint8_t page_code, uint8_t *data) {
     int rc = LSM_ERR_OK;
     uint8_t cdb[_T10_SPC_RECV_DIAG_CMD_LEN];
     int ioctl_errno = 0;
-    char strerr_buff[_LSM_ERR_MSG_LEN];
+    struct _sg_io_status io_status;
+    char sg_io_err[_SG_IO_ERR_STR_LEN];
     uint8_t sense_data[_T10_SPC_SENSE_DATA_MAX_LENGTH];
     uint8_t sense_key = _T10_SPC_SENSE_KEY_NO_SENSE;
     char sense_err_msg[_LSM_ERR_MSG_LEN / 2];
@@ -1011,21 +1194,21 @@ int _sg_io_recv_diag(char *err_msg, int fd, uint8_t page_code, uint8_t *data) {
      * yet.
      */
 
-    ioctl_errno =
-        _sg_io_v4(fd, cdb, _T10_SPC_RECV_DIAG_CMD_LEN, data,
-                  _SG_T10_SPC_RECV_DIAG_MAX_LEN, sense_data, _SG_IO_RECV_DATA);
+    ioctl_errno = _sg_io_v4(fd, cdb, _T10_SPC_RECV_DIAG_CMD_LEN, data,
+                            _SG_T10_SPC_RECV_DIAG_MAX_LEN, sense_data,
+                            _SG_IO_RECV_DATA, &io_status);
+    /* TODO(Gris Ge): Check 'Supported Diagnostic Pages diagnostic page' */
     if (ioctl_errno != 0) {
         rc = LSM_ERR_LIB_BUG;
         /* TODO(Gris Ge): Check 'Supported Diagnostic Pages diagnostic page' */
         _check_sense_data(sense_err_msg, sense_data, &sense_key);
 
-        _lsm_err_msg_set(
-            err_msg,
-            "Got error from SGIO RECEIVE_DIAGNOSTIC "
-            "for page code 0x%02x: error %d(%s), %s",
-            page_code, ioctl_errno,
-            error_to_str(ioctl_errno, strerr_buff, _LSM_ERR_MSG_LEN),
-            sense_err_msg);
+        _lsm_err_msg_set(err_msg,
+                         "Got error from SGIO RECEIVE_DIAGNOSTIC "
+                         "for page code 0x%02x: %s, %s",
+                         page_code,
+                         _sg_io_err_str(ioctl_errno, &io_status, sg_io_err),
+                         sense_err_msg);
         goto out;
     }
 
@@ -1038,7 +1221,8 @@ int _sg_io_send_diag(char *err_msg, int fd, uint8_t *data, uint16_t data_len) {
     int rc = LSM_ERR_OK;
     uint8_t cdb[_T10_SPC_SEND_DIAG_CMD_LEN];
     int ioctl_errno = 0;
-    char strerr_buff[_LSM_ERR_MSG_LEN];
+    struct _sg_io_status io_status;
+    char sg_io_err[_SG_IO_ERR_STR_LEN];
     uint8_t sense_data[_T10_SPC_SENSE_DATA_MAX_LENGTH];
     uint8_t sense_key = _T10_SPC_SENSE_KEY_NO_SENSE;
     char sense_err_msg[_LSM_ERR_MSG_LEN / 2];
@@ -1068,19 +1252,18 @@ int _sg_io_send_diag(char *err_msg, int fd, uint8_t *data, uint16_t data_len) {
      */
 
     ioctl_errno = _sg_io_v4(fd, cdb, _T10_SPC_SEND_DIAG_CMD_LEN, data, data_len,
-                            sense_data, _SG_IO_SEND_DATA);
+                            sense_data, _SG_IO_SEND_DATA, &io_status);
+    /* TODO(Gris Ge): No idea why this could fail */
     if (ioctl_errno != 0) {
         rc = LSM_ERR_LIB_BUG;
         /* TODO(Gris Ge): No idea why this could fail */
         _check_sense_data(sense_err_msg, sense_data, &sense_key);
 
-        _lsm_err_msg_set(
-            err_msg,
-            "Got error from SGIO SEND_DIAGNOSTIC "
-            "for error %d(%s), %s",
-            ioctl_errno,
-            error_to_str(ioctl_errno, strerr_buff, _LSM_ERR_MSG_LEN),
-            sense_err_msg);
+        _lsm_err_msg_set(err_msg,
+                         "Got error from SGIO SEND_DIAGNOSTIC "
+                         "for %s, %s",
+                         _sg_io_err_str(ioctl_errno, &io_status, sg_io_err),
+                         sense_err_msg);
     }
 
     return rc;
@@ -1148,7 +1331,8 @@ int _sg_io_mode_sense(char *err_msg, int fd, uint8_t page_code,
     uint8_t cdb[_T10_SPC_MODE_SENSE_CMD_LEN];
     uint8_t sense_data[_T10_SPC_SENSE_DATA_MAX_LENGTH];
     int ioctl_errno = 0;
-    char strerr_buff[_LSM_ERR_MSG_LEN];
+    struct _sg_io_status io_status;
+    char sg_io_err[_SG_IO_ERR_STR_LEN];
     uint8_t sense_key = _T10_SPC_SENSE_KEY_NO_SENSE;
     char sense_err_msg[_LSM_ERR_MSG_LEN / 2];
     struct _sg_t10_mode_para_hdr *mode_hdr = NULL;
@@ -1183,9 +1367,9 @@ int _sg_io_mode_sense(char *err_msg, int fd, uint8_t page_code,
      * yet.
      */
 
-    ioctl_errno =
-        _sg_io_v3(fd, cdb, _T10_SPC_MODE_SENSE_CMD_LEN, tmp_data,
-                  _SG_T10_SPC_MODE_SENSE_MAX_LEN, sense_data, _SG_IO_RECV_DATA);
+    ioctl_errno = _sg_io_v3(fd, cdb, _T10_SPC_MODE_SENSE_CMD_LEN, tmp_data,
+                            _SG_T10_SPC_MODE_SENSE_MAX_LEN, sense_data,
+                            _SG_IO_RECV_DATA, &io_status);
 
     if (ioctl_errno == 0) {
         mode_hdr = (struct _sg_t10_mode_para_hdr *)tmp_data;
@@ -1241,23 +1425,21 @@ int _sg_io_mode_sense(char *err_msg, int fd, uint8_t page_code,
                              "SCSI MODE SENSE 0x%02x page and "
                              "sub page 0x%02x is not supported",
                              page_code, sub_page_code);
-            goto out;
         } else {
             rc = LSM_ERR_LIB_BUG;
             _lsm_err_msg_set(err_msg,
                              "BUG: Unexpected failure of "
                              "_sg_io_mode_sense(): %s",
                              sense_err_msg);
-            goto out;
         }
+        goto out;
     }
     rc = LSM_ERR_LIB_BUG;
     _lsm_err_msg_set(err_msg,
                      "BUG: Unexpected failure of "
-                     "_sg_io_mode_sense(): error %d(%s), with no error in "
+                     "_sg_io_mode_sense(): %s, with no error in "
                      "SCSI sense data",
-                     ioctl_errno,
-                     error_to_str(ioctl_errno, strerr_buff, _LSM_ERR_MSG_LEN));
+                     _sg_io_err_str(ioctl_errno, &io_status, sg_io_err));
 
 out:
     return rc;
@@ -1374,7 +1556,8 @@ static int _sg_log_sense(char *err_msg, int fd, uint8_t page_code,
     uint8_t cdb[_T10_SPC_LOG_SENSE_CMD_LEN];
     uint8_t sense_data[_T10_SPC_SENSE_DATA_MAX_LENGTH];
     int ioctl_errno = 0;
-    char strerr_buff[_LSM_ERR_MSG_LEN];
+    struct _sg_io_status io_status;
+    char sg_io_err[_SG_IO_ERR_STR_LEN];
     uint8_t sense_key = _T10_SPC_SENSE_KEY_NO_SENSE;
     char sense_err_msg[_LSM_ERR_MSG_LEN / 2];
     struct _sg_t10_log_para_hdr *log_hdr = NULL;
@@ -1401,11 +1584,11 @@ static int _sg_log_sense(char *err_msg, int fd, uint8_t page_code,
     cdb[7] = (_T10_SPC_LOG_SENSE_MAX_LEN >> 8) & UINT8_MAX;
     cdb[8] = _T10_SPC_LOG_SENSE_MAX_LEN & UINT8_MAX;
 
-    ioctl_errno =
-        _sg_io_v3(fd, cdb, _T10_SPC_LOG_SENSE_CMD_LEN, tmp_data,
-                  _T10_SPC_LOG_SENSE_MAX_LEN, sense_data, _SG_IO_RECV_DATA);
+    ioctl_errno = _sg_io_v3(fd, cdb, _T10_SPC_LOG_SENSE_CMD_LEN, tmp_data,
+                            _T10_SPC_LOG_SENSE_MAX_LEN, sense_data,
+                            _SG_IO_RECV_DATA, &io_status);
 
-    if (ioctl_errno) {
+    if (ioctl_errno != 0) {
         rc = LSM_ERR_LIB_BUG;
         _check_sense_data(sense_err_msg, sense_data, &sense_key);
 
@@ -1414,13 +1597,11 @@ static int _sg_log_sense(char *err_msg, int fd, uint8_t page_code,
             goto out;
         }
 
-        _lsm_err_msg_set(
-            err_msg,
-            "Got error from SGIO LOG SENSE "
-            "with error %d(%s), %s",
-            ioctl_errno,
-            error_to_str(ioctl_errno, strerr_buff, _LSM_ERR_MSG_LEN),
-            sense_err_msg);
+        _lsm_err_msg_set(err_msg,
+                         "Got error from SGIO LOG SENSE "
+                         "with %s, %s",
+                         _sg_io_err_str(ioctl_errno, &io_status, sg_io_err),
+                         sense_err_msg);
         goto out;
     }
 
@@ -1520,9 +1701,10 @@ int _sg_request_sense(char *err_msg, int fd, uint8_t *returned_sense_data) {
     uint8_t cdb[_T10_SPC_REQUEST_SENSE_CMD_LEN];
     uint8_t sense_data[_T10_SPC_SENSE_DATA_MAX_LENGTH];
     int ioctl_errno = 0;
+    struct _sg_io_status io_status;
     uint8_t sense_key = _T10_SPC_SENSE_KEY_NO_SENSE;
     char sense_err_msg[_LSM_ERR_MSG_LEN / 2];
-    char strerr_buff[_LSM_ERR_MSG_LEN];
+    char sg_io_err[_SG_IO_ERR_STR_LEN];
 
     assert(err_msg != NULL);
     assert(fd >= 0);
@@ -1534,11 +1716,11 @@ int _sg_request_sense(char *err_msg, int fd, uint8_t *returned_sense_data) {
     cdb[0] = REQUEST_SENSE;
     cdb[4] = _T10_SPC_REQUEST_SENSE_MAX_LEN & UINT8_MAX;
 
-    ioctl_errno =
-        _sg_io_v3(fd, cdb, _T10_SPC_REQUEST_SENSE_CMD_LEN, request_sense,
-                  _T10_SPC_REQUEST_SENSE_MAX_LEN, sense_data, _SG_IO_RECV_DATA);
+    ioctl_errno = _sg_io_v3(fd, cdb, _T10_SPC_REQUEST_SENSE_CMD_LEN,
+                            request_sense, _T10_SPC_REQUEST_SENSE_MAX_LEN,
+                            sense_data, _SG_IO_RECV_DATA, &io_status);
 
-    if (ioctl_errno) {
+    if (ioctl_errno != 0) {
         rc = LSM_ERR_LIB_BUG;
         _check_sense_data(sense_err_msg, sense_data, &sense_key);
 
@@ -1547,13 +1729,11 @@ int _sg_request_sense(char *err_msg, int fd, uint8_t *returned_sense_data) {
             goto out;
         }
 
-        _lsm_err_msg_set(
-            err_msg,
-            "Got error from SGIO REQUEST SENSE: "
-            "error %d(%s) %s",
-            ioctl_errno,
-            error_to_str(ioctl_errno, strerr_buff, _LSM_ERR_MSG_LEN),
-            sense_err_msg);
+        _lsm_err_msg_set(err_msg,
+                         "Got error from SGIO REQUEST SENSE: "
+                         "%s %s",
+                         _sg_io_err_str(ioctl_errno, &io_status, sg_io_err),
+                         sense_err_msg);
         goto out;
     }
 
@@ -1641,6 +1821,8 @@ out:
 int _sg_ata_health_status(char *err_msg, int fd, int32_t *health_status) {
     int rc = LSM_ERR_OK;
     int ioctl_errno = 0;
+    struct _sg_io_status io_status;
+    char sg_io_err[_SG_IO_ERR_STR_LEN];
     struct _sg_t10_ata_pass_through_12_cdb cdb;
     uint8_t sense_data[_T10_SPC_SENSE_DATA_MAX_LENGTH];
     uint8_t lba_mid = 0;
@@ -1691,14 +1873,17 @@ int _sg_ata_health_status(char *err_msg, int fd, int32_t *health_status) {
     /* ^ We don't need NACA. SAT-4 rev 06 Table 10 - CONTROL BYTE fields */
 
     ioctl_errno = _sg_io_v3(fd, (uint8_t *)&cdb, sizeof(cdb), NULL, 0,
-                            sense_data, _SG_IO_NO_DATA);
-    /* ^ The ioctl should always failed as we are expecting sense data for
-     * CHECK CONDITION
+                            sense_data, _SG_IO_NO_DATA, &io_status);
+    /* ^ CK_COND is set, so the SATL owes us a CHECK CONDITION carrying the ATA
+     * registers. Anything else, including a plain success, means we have no
+     * registers to interpret.
      */
-    if (ioctl_errno == 0) {
+    if (ioctl_errno != -1) {
         rc = LSM_ERR_LIB_BUG;
-        _lsm_err_msg_set(err_msg, "BUG: ATA pass through command ioctl return "
-                                  "0, but expecting a fail with sense data");
+        _lsm_err_msg_set(err_msg,
+                         "BUG: ATA pass through command was expected to fail "
+                         "with sense data, got %s",
+                         _sg_io_err_str(ioctl_errno, &io_status, sg_io_err));
         goto out;
     }
 
@@ -1737,7 +1922,7 @@ int _sg_ata_health_status(char *err_msg, int fd, int32_t *health_status) {
                                       &lba_high),
               rc, out);
     } else {
-        rc = LSM_ERR_LIB_BUG;
+        rc = LSM_ERR_INVALID_ARGUMENT;
         _lsm_err_msg_set(err_msg,
                          "BUG: Expecting a CHECK CONDITION sense data "
                          "with Response codes 0x70 or 0x72, but got 0x%02x",
