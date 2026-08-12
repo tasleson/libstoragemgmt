@@ -456,6 +456,9 @@ class ErrorNumber(object):
     OK = 0
     LIB_BUG = 1
     PLUGIN_BUG = 2
+    # Hardware returned something we cannot use, or the command never made it
+    # through the transport. Not the library's fault and not the plugin's.
+    DEVICE_BUG = 3
     JOB_STARTED = 7
     TIMEOUT = 11
     DAEMON_NOT_RUNNING = 12

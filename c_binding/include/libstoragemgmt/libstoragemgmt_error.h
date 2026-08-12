@@ -25,6 +25,12 @@ typedef enum {
     LSM_ERR_LIB_BUG = 1,
     /** Plugin BUG */
     LSM_ERR_PLUGIN_BUG = 2,
+    /** The device or its transport is at fault, not the library or the
+        plugin. Returned when hardware answers a command with data that
+        cannot be interpreted, such as length fields that contradict the
+        amount of data actually transferred, or when a command never
+        completed at the transport layer. Added in 1.11. */
+    LSM_ERR_DEVICE_BUG = 3,
     /** Operation has started */
     LSM_ERR_JOB_STARTED = 7,
     /** Plug-in is un-responsive */
