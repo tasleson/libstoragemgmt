@@ -3744,14 +3744,20 @@ START_TEST(test_local_disk_link_type) {
     lsm_error *lsm_err = NULL;
 
     rc = lsm_local_disk_link_type_get("/dev/sda", &link_type, &lsm_err);
+    /* Both codes mean we could not make sense of a real disk. LSM_ERR_LIB_BUG
+     * blames us, LSM_ERR_DEVICE_BUG blames the drive, and either one on the
+     * machine running the tests is worth failing over.
+     */
     if (lsm_err != NULL)
-        ck_assert_msg(rc != LSM_ERR_LIB_BUG,
-                      "lsm_local_disk_link_type_get() got LSM_ERR_LIB_BUG: %s",
+        ck_assert_msg(rc != LSM_ERR_LIB_BUG && rc != LSM_ERR_DEVICE_BUG,
+                      "lsm_local_disk_link_type_get() got %s: %s",
+                      rc == LSM_ERR_LIB_BUG ? "LSM_ERR_LIB_BUG"
+                                            : "LSM_ERR_DEVICE_BUG",
                       lsm_error_message_get(lsm_err));
     else
-        ck_assert_msg(rc != LSM_ERR_LIB_BUG,
-                      "lsm_local_disk_link_type_get() got LSM_ERR_LIB_BUG with "
-                      "NULL lsm_err");
+        ck_assert_msg(rc != LSM_ERR_LIB_BUG && rc != LSM_ERR_DEVICE_BUG,
+                      "lsm_local_disk_link_type_get() got a bug error code "
+                      "with NULL lsm_err");
 
     if (rc != LSM_ERR_OK)
         lsm_error_free(lsm_err);

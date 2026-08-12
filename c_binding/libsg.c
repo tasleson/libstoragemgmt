@@ -780,11 +780,12 @@ int _sg_io_vpd(char *err_msg, int fd, uint8_t page_code, uint8_t *data,
                 }
                 if (_sg_is_vpd_page_supported(vpd_00_data, vpd_00_data_len,
                                               page_code) == true) {
-                    /* Current VPD page is supported, then it's a library bug */
-                    rc = LSM_ERR_LIB_BUG;
+                    /* The device contradicts itself: it listed this page as
+                     * supported and then refused to return it. */
+                    rc = LSM_ERR_DEVICE_BUG;
                     _lsm_err_msg_set(
                         err_msg,
-                        "BUG: VPD page 0x%02x is supported, "
+                        "VPD page 0x%02x is listed as supported, "
                         "but failed with %s, %s",
                         page_code,
                         _sg_io_err_str(ioctl_errno, &io_status, sg_io_err),
@@ -799,9 +800,9 @@ int _sg_io_vpd(char *err_msg, int fd, uint8_t page_code, uint8_t *data,
                     goto out;
                 }
             } else {
-                rc = LSM_ERR_LIB_BUG;
+                rc = LSM_ERR_DEVICE_BUG;
                 _lsm_err_msg_set(err_msg,
-                                 "BUG: Unexpected failure of _sg_io_vpd(): %s",
+                                 "Unexpected failure of _sg_io_vpd(): %s",
                                  sense_err_msg);
                 goto out;
             }
@@ -814,9 +815,9 @@ int _sg_io_vpd(char *err_msg, int fd, uint8_t page_code, uint8_t *data,
             rc = LSM_ERR_NO_SUPPORT;
             goto out;
         }
-        rc = LSM_ERR_LIB_BUG;
+        rc = LSM_ERR_DEVICE_BUG;
         _lsm_err_msg_set(err_msg,
-                         "BUG: Unexpected failure of _sg_io_vpd(): "
+                         "Unexpected failure of _sg_io_vpd(): "
                          "%s, with no error in SCSI sense data",
                          _sg_io_err_str(ioctl_errno, &io_status, sg_io_err));
     } else {
@@ -898,9 +899,9 @@ int _sg_parse_vpd_80(char *err_msg, uint8_t *vpd_data, uint16_t vpd_data_len,
             parsed_serial_len + sizeof(struct _sg_t10_vpd80_header);
 
         if (vpd80_total_len > vpd_data_len) {
-            rc = LSM_ERR_LIB_BUG;
+            rc = LSM_ERR_DEVICE_BUG;
             _lsm_err_msg_set(err_msg,
-                             "BUG: Got invalid VPD UNIT SN page response, PAGE "
+                             "Got invalid VPD UNIT SN page response, PAGE "
                              "LENGTH claims %zu bytes but only %" PRIu16
                              " were transferred",
                              vpd80_total_len, vpd_data_len);
@@ -972,9 +973,9 @@ int _sg_parse_vpd_83(char *err_msg, uint8_t *vpd_data, uint16_t vpd_data_len,
                 sizeof(struct _sg_t10_vpd83_header);
 
     if (vpd83_len > vpd_data_len) {
-        rc = LSM_ERR_LIB_BUG;
+        rc = LSM_ERR_DEVICE_BUG;
         _lsm_err_msg_set(err_msg,
-                         "BUG: Got invalid VPD DI page response, PAGE LENGTH "
+                         "Got invalid VPD DI page response, PAGE LENGTH "
                          "claims %zu bytes but only %" PRIu16
                          " were transferred",
                          vpd83_len, vpd_data_len);
@@ -988,8 +989,8 @@ int _sg_parse_vpd_83(char *err_msg, uint8_t *vpd_data, uint16_t vpd_data_len,
     while (p <= end_p) {
         size_t rem = (size_t)(end_p - p) + 1;
         if (rem < sizeof(struct _sg_t10_vpd83_dp_header)) {
-            rc = LSM_ERR_LIB_BUG;
-            _lsm_err_msg_set(err_msg, "BUG: Illegal VPD 0x83 page data, "
+            rc = LSM_ERR_DEVICE_BUG;
+            _lsm_err_msg_set(err_msg, "Illegal VPD 0x83 page data, "
                                       "got partial designation descriptor.");
             goto out;
         }
@@ -998,8 +999,8 @@ int _sg_parse_vpd_83(char *err_msg, uint8_t *vpd_data, uint16_t vpd_data_len,
 
         if (rem < sizeof(struct _sg_t10_vpd83_dp_header) +
                       dp_header->designator_len) {
-            rc = LSM_ERR_LIB_BUG;
-            _lsm_err_msg_set(err_msg, "BUG: Illegal VPD 0x83 page data, "
+            rc = LSM_ERR_DEVICE_BUG;
+            _lsm_err_msg_set(err_msg, "Illegal VPD 0x83 page data, "
                                       "designator length exceeds page data.");
             goto out;
         }
@@ -1102,6 +1103,7 @@ static int _check_sense_data(char *sense_err_msg, uint8_t *sense_data,
     uint8_t asc = 0;
     uint8_t ascq = 0;
 
+    assert(sense_err_msg != NULL);
     assert(sense_data != NULL);
     assert(sense_key != NULL);
 
@@ -1234,7 +1236,7 @@ int _sg_io_recv_diag(char *err_msg, int fd, uint8_t page_code, uint8_t *data) {
     ioctl_errno = _sg_io_resolve_sense(ioctl_errno, sense_data, sense_err_msg,
                                        &sense_key);
     if (ioctl_errno != 0) {
-        rc = LSM_ERR_LIB_BUG;
+        rc = LSM_ERR_DEVICE_BUG;
 
         _lsm_err_msg_set(err_msg,
                          "Got error from SGIO RECEIVE_DIAGNOSTIC "
@@ -1290,7 +1292,7 @@ int _sg_io_send_diag(char *err_msg, int fd, uint8_t *data, uint16_t data_len) {
     ioctl_errno = _sg_io_resolve_sense(ioctl_errno, sense_data, sense_err_msg,
                                        &sense_key);
     if (ioctl_errno != 0) {
-        rc = LSM_ERR_LIB_BUG;
+        rc = LSM_ERR_DEVICE_BUG;
 
         _lsm_err_msg_set(err_msg,
                          "Got error from SGIO SEND_DIAGNOSTIC "
@@ -1417,9 +1419,9 @@ int _sg_io_mode_sense(char *err_msg, int fd, uint8_t page_code,
         if ((mode_data_len == 0) ||
             (mode_data_len > _SG_T10_SPC_MODE_SENSE_MAX_LEN -
                                  sizeof(mode_hdr->mode_data_len_be))) {
-            rc = LSM_ERR_LIB_BUG;
+            rc = LSM_ERR_DEVICE_BUG;
             _lsm_err_msg_set(err_msg,
-                             "BUG: Got illegal SCSI mode page return: "
+                             "Got illegal SCSI mode page return: "
                              "invalid MODE DATA LENGTH %" PRIu16 "\n",
                              mode_data_len);
             goto out;
@@ -1427,9 +1429,9 @@ int _sg_io_mode_sense(char *err_msg, int fd, uint8_t page_code,
         block_dp_len = be16toh(mode_hdr->block_dp_header_len_be);
         if ((block_dp_len >= _SG_T10_SPC_MODE_SENSE_MAX_LEN -
                                  sizeof(struct _sg_t10_mode_para_hdr))) {
-            rc = LSM_ERR_LIB_BUG;
+            rc = LSM_ERR_DEVICE_BUG;
             _lsm_err_msg_set(err_msg,
-                             "BUG: Got illegal SCSI mode page return: "
+                             "Got illegal SCSI mode page return: "
                              "invalid BLOCK DESCRIPTOR LENGTH %" PRIu16 "\n",
                              block_dp_len);
             goto out;
@@ -1437,9 +1439,9 @@ int _sg_io_mode_sense(char *err_msg, int fd, uint8_t page_code,
         if (mode_data_len < sizeof(struct _sg_t10_mode_para_hdr) -
                                 sizeof(mode_hdr->mode_data_len_be) +
                                 block_dp_len) {
-            rc = LSM_ERR_LIB_BUG;
+            rc = LSM_ERR_DEVICE_BUG;
             _lsm_err_msg_set(err_msg,
-                             "BUG: Got illegal SCSI mode page return: "
+                             "Got illegal SCSI mode page return: "
                              "MODE DATA LENGTH %" PRIu16
                              " too small for BLOCK DESCRIPTOR LENGTH %" PRIu16
                              "\n",
@@ -1461,17 +1463,17 @@ int _sg_io_mode_sense(char *err_msg, int fd, uint8_t page_code,
                              "sub page 0x%02x is not supported",
                              page_code, sub_page_code);
         } else {
-            rc = LSM_ERR_LIB_BUG;
+            rc = LSM_ERR_DEVICE_BUG;
             _lsm_err_msg_set(err_msg,
-                             "BUG: Unexpected failure of "
+                             "Unexpected failure of "
                              "_sg_io_mode_sense(): %s",
                              sense_err_msg);
         }
         goto out;
     }
-    rc = LSM_ERR_LIB_BUG;
+    rc = LSM_ERR_DEVICE_BUG;
     _lsm_err_msg_set(err_msg,
-                     "BUG: Unexpected failure of "
+                     "Unexpected failure of "
                      "_sg_io_mode_sense(): %s, with no error in "
                      "SCSI sense data",
                      _sg_io_err_str(ioctl_errno, &io_status, sg_io_err));
@@ -1535,7 +1537,7 @@ static int _extract_ata_sense_data(char *err_msg, uint8_t *sense_data,
     while (tmp_p < end_p) {
         if ((size_t)(end_p - tmp_p) <
             sizeof(struct _sg_t10_sense_data_dp_hdr)) {
-            rc = LSM_ERR_INVALID_ARGUMENT;
+            rc = LSM_ERR_DEVICE_BUG;
             _lsm_err_msg_set(err_msg,
                              "Got truncated SCSI SENSE descriptor header");
             goto out;
@@ -1543,7 +1545,7 @@ static int _extract_ata_sense_data(char *err_msg, uint8_t *sense_data,
         cur_dp = (struct _sg_t10_sense_data_dp_hdr *)tmp_p;
 
         if (cur_dp->len == 0) {
-            rc = LSM_ERR_INVALID_ARGUMENT;
+            rc = LSM_ERR_DEVICE_BUG;
             _lsm_err_msg_set(err_msg, "Got zero-length SCSI SENSE descriptor");
             goto out;
         }
@@ -1552,7 +1554,7 @@ static int _extract_ata_sense_data(char *err_msg, uint8_t *sense_data,
             _T10_SAT_ATA_STATUS_RETURN_SENSE_DP_CODE) {
 
             if (cur_dp->len != _T10_SAT_ATA_STATUS_RETURN_SENSE_LEN) {
-                rc = LSM_ERR_INVALID_ARGUMENT;
+                rc = LSM_ERR_DEVICE_BUG;
                 _lsm_err_msg_set(err_msg,
                                  "Got corrupted SCSI SENSE data for "
                                  "ATA pass through, expected length %d, "
@@ -1563,7 +1565,7 @@ static int _extract_ata_sense_data(char *err_msg, uint8_t *sense_data,
             }
             if ((size_t)(end_p - tmp_p) <
                 sizeof(struct _sg_t10_ata_status_sense_dp)) {
-                rc = LSM_ERR_INVALID_ARGUMENT;
+                rc = LSM_ERR_DEVICE_BUG;
                 _lsm_err_msg_set(err_msg,
                                  "Got truncated ATA status SENSE descriptor");
                 goto out;
@@ -1626,7 +1628,7 @@ static int _sg_log_sense(char *err_msg, int fd, uint8_t page_code,
                                        &sense_key);
 
     if (ioctl_errno != 0) {
-        rc = LSM_ERR_LIB_BUG;
+        rc = LSM_ERR_DEVICE_BUG;
 
         if (sense_key == _T10_SPC_SENSE_KEY_ILLEGAL_REQUEST) {
             rc = LSM_ERR_NO_SUPPORT;
@@ -1646,9 +1648,9 @@ static int _sg_log_sense(char *err_msg, int fd, uint8_t page_code,
     if ((log_data_len == 0) ||
         (log_data_len >=
          _T10_SPC_LOG_SENSE_MAX_LEN - sizeof(struct _sg_t10_log_para_hdr))) {
-        rc = LSM_ERR_LIB_BUG;
+        rc = LSM_ERR_DEVICE_BUG;
         _lsm_err_msg_set(err_msg,
-                         "BUG: Got illegal SCSI log page return: "
+                         "Got illegal SCSI log page return: "
                          "invalid LOG DATA LENGTH %" PRIu16 "\n",
                          log_data_len);
         goto out;
@@ -1759,7 +1761,7 @@ int _sg_request_sense(char *err_msg, int fd, uint8_t *returned_sense_data) {
                                        &sense_key);
 
     if (ioctl_errno != 0) {
-        rc = LSM_ERR_LIB_BUG;
+        rc = LSM_ERR_DEVICE_BUG;
 
         if (sense_key == _T10_SPC_SENSE_KEY_ILLEGAL_REQUEST) {
             rc = LSM_ERR_NO_SUPPORT;
@@ -1799,8 +1801,8 @@ int32_t _sg_info_excep_interpret_asc(uint8_t asc) {
  * 3. Return the health status to the caller.
  *
  * Input *health_status should be a pointer to an int32_t value.
- * Return LSM_ERR_NO_MEMORY or LSM_ERR_NO_SUPPORT or LSM_ERR_LIB_BUG or
- * LSM_ERR_NOT_FOUND_DISK.
+ * Return LSM_ERR_NO_MEMORY or LSM_ERR_NO_SUPPORT or LSM_ERR_DEVICE_BUG or
+ * LSM_ERR_LIB_BUG or LSM_ERR_NOT_FOUND_DISK.
  */
 int _sg_sas_health_status(char *err_msg, int fd, int32_t *health_status) {
     int rc = LSM_ERR_OK;
@@ -1852,8 +1854,8 @@ out:
  * Query a SATA drive attached via SAS to get its health status.
  *
  * Input *health_status should be a pointer to an int32_t value.
- * Return LSM_ERR_NO_MEMORY or LSM_ERR_NO_SUPPORT or LSM_ERR_LIB_BUG or
- * LSM_ERR_NOT_FOUND_DISK.
+ * Return LSM_ERR_NO_MEMORY or LSM_ERR_NO_SUPPORT or LSM_ERR_DEVICE_BUG or
+ * LSM_ERR_LIB_BUG or LSM_ERR_NOT_FOUND_DISK.
  */
 int _sg_ata_health_status(char *err_msg, int fd, int32_t *health_status) {
     int rc = LSM_ERR_OK;
@@ -1916,9 +1918,9 @@ int _sg_ata_health_status(char *err_msg, int fd, int32_t *health_status) {
      * registers to interpret.
      */
     if (ioctl_errno != -1) {
-        rc = LSM_ERR_LIB_BUG;
+        rc = LSM_ERR_DEVICE_BUG;
         _lsm_err_msg_set(err_msg,
-                         "BUG: ATA pass through command was expected to fail "
+                         "ATA pass through command was expected to fail "
                          "with sense data, got %s",
                          _sg_io_err_str(ioctl_errno, &io_status, sg_io_err));
         goto out;
@@ -1959,9 +1961,9 @@ int _sg_ata_health_status(char *err_msg, int fd, int32_t *health_status) {
                                       &lba_high),
               rc, out);
     } else {
-        rc = LSM_ERR_INVALID_ARGUMENT;
+        rc = LSM_ERR_DEVICE_BUG;
         _lsm_err_msg_set(err_msg,
-                         "BUG: Expecting a CHECK CONDITION sense data "
+                         "Expecting a CHECK CONDITION sense data "
                          "with Response codes 0x70 or 0x72, but got 0x%02x",
                          sense_hdr->response_code);
         goto out;
