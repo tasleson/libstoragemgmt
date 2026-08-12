@@ -444,9 +444,11 @@ static int _sg_io_v4(int fd, uint8_t *cdb, uint8_t cdb_len, uint8_t *data,
     return rc;
 }
 
-int _sg_io_vpd(char *err_msg, int fd, uint8_t page_code, uint8_t *data) {
+int _sg_io_vpd(char *err_msg, int fd, uint8_t page_code, uint8_t *data,
+               uint16_t *data_len) {
     int rc = LSM_ERR_OK;
     uint8_t vpd_00_data[_SG_T10_SPC_VPD_MAX_LEN];
+    uint16_t vpd_00_data_len = 0;
     uint8_t cdb[_T10_SPC_INQUIRY_CMD_LEN];
     uint8_t sense_data[_T10_SPC_SENSE_DATA_MAX_LENGTH];
     int ioctl_errno = 0;
@@ -454,28 +456,37 @@ int _sg_io_vpd(char *err_msg, int fd, uint8_t page_code, uint8_t *data) {
     char strerr_buff[_LSM_ERR_MSG_LEN];
     uint8_t sense_key = _T10_SPC_SENSE_KEY_NO_SENSE;
     char sense_err_msg[_LSM_ERR_MSG_LEN / 2];
-    ssize_t data_len = 0;
+    uint16_t alloc_len = 0;
 
     assert(err_msg != NULL);
     assert(fd >= 0);
     assert(data != NULL);
+    assert(data_len != NULL);
 
     memset(sense_err_msg, 0, sizeof(sense_err_msg));
+    *data_len = 0;
+
+    /* Callers hand us the full sized buffer but we only ever ask the device
+     * for 'alloc_len' bytes of it, so zero the whole thing: whatever the
+     * device leaves untouched has to read back as zero rather than as
+     * whatever the caller had on its stack.
+     */
+    memset(data, 0, _SG_T10_SPC_VPD_MAX_LEN);
 
     switch (page_code) {
     case _SG_T10_SPC_VPD_ATA_INFO:
-        data_len = _T10_SAT_ATA_INFO_VPD_PAGE_MAX_LEN;
+        alloc_len = _T10_SAT_ATA_INFO_VPD_PAGE_MAX_LEN;
         break;
     case _SG_T10_SBC_VPD_BLK_DEV_CHA:
-        data_len = _T10_SBC_VPD_BLK_DEV_CHA_MAX_LEN;
+        alloc_len = _T10_SBC_VPD_BLK_DEV_CHA_MAX_LEN;
         break;
     case _SG_T10_SPC_VPD_SUP_VPD_PGS:
     case _SG_T10_SPC_VPD_UNIT_SN:
     case _SG_T10_SPC_VPD_DI:
-        data_len = _SG_T10_SPC_VPD_SMALL_MAX_LEN;
+        alloc_len = _SG_T10_SPC_VPD_SMALL_MAX_LEN;
         break;
     default:
-        data_len = _SG_T10_SPC_VPD_MAX_LEN;
+        alloc_len = _SG_T10_SPC_VPD_MAX_LEN;
     }
 
     /* SPC-5 Table 142 - INQUIRY command */
@@ -483,16 +494,16 @@ int _sg_io_vpd(char *err_msg, int fd, uint8_t page_code, uint8_t *data) {
     cdb[1] = 1;       /* EVPD */
     /* VPD INQUIRY requires EVPD == 1 */;
     cdb[2] = page_code & UINT8_MAX; /* PAGE CODE */
-    cdb[3] = (data_len >> 8) & UINT8_MAX;
+    cdb[3] = (alloc_len >> 8) & UINT8_MAX;
     /* ALLOCATION LENGTH, MSB */
-    cdb[4] = data_len & UINT8_MAX;
+    cdb[4] = alloc_len & UINT8_MAX;
     /* ALLOCATION LENGTH, LSB */
     cdb[5] = 0; /* CONTROL */
     /* We have no use case need for handling auto contingent allegiance(ACA)
      * yet.
      */
 
-    ioctl_errno = _sg_io_v3(fd, cdb, _T10_SPC_INQUIRY_CMD_LEN, data, data_len,
+    ioctl_errno = _sg_io_v3(fd, cdb, _T10_SPC_INQUIRY_CMD_LEN, data, alloc_len,
                             sense_data, _SG_IO_RECV_DATA);
 
     if (ioctl_errno != 0) {
@@ -505,12 +516,13 @@ int _sg_io_vpd(char *err_msg, int fd, uint8_t page_code, uint8_t *data) {
             if (sense_key == _T10_SPC_SENSE_KEY_ILLEGAL_REQUEST) {
                 /* Check whether provided page is supported */
                 rc_vpd_00 = _sg_io_vpd(err_msg, fd, _SG_T10_SPC_VPD_SUP_VPD_PGS,
-                                       vpd_00_data);
+                                       vpd_00_data, &vpd_00_data_len);
                 if (rc_vpd_00 != 0) {
                     rc = LSM_ERR_NO_SUPPORT;
                     goto out;
                 }
-                if (_sg_is_vpd_page_supported(vpd_00_data, page_code) == true) {
+                if (_sg_is_vpd_page_supported(vpd_00_data, vpd_00_data_len,
+                                              page_code) == true) {
                     /* Current VPD page is supported, then it's a library bug */
                     rc = LSM_ERR_LIB_BUG;
                     _lsm_err_msg_set(err_msg,
@@ -552,6 +564,8 @@ int _sg_io_vpd(char *err_msg, int fd, uint8_t page_code, uint8_t *data) {
             "error %d(%s), with no error in SCSI sense data",
             ioctl_errno,
             error_to_str(ioctl_errno, strerr_buff, _LSM_ERR_MSG_LEN));
+    } else {
+        *data_len = alloc_len;
     }
 
 out:
@@ -559,7 +573,8 @@ out:
     return rc;
 }
 
-bool _sg_is_vpd_page_supported(uint8_t *vpd_0_data, uint8_t page_code) {
+bool _sg_is_vpd_page_supported(uint8_t *vpd_0_data, uint16_t vpd_0_data_len,
+                               uint8_t page_code) {
     uint16_t supported_list_len = 0;
     uint16_t i = 0;
     struct _sg_t10_vpd00 *vpd00 = NULL;
@@ -571,7 +586,7 @@ bool _sg_is_vpd_page_supported(uint8_t *vpd_0_data, uint8_t page_code) {
     supported_list_len = be16toh(vpd00->page_len_be);
 
     for (; i < supported_list_len; ++i) {
-        if (i + _T10_SPC_VPD_SUP_VPD_PGS_LIST_OFFSET >= _SG_T10_SPC_VPD_MAX_LEN)
+        if (i + _T10_SPC_VPD_SUP_VPD_PGS_LIST_OFFSET >= vpd_0_data_len)
             break;
         if (page_code == vpd_0_data[i + _T10_SPC_VPD_SUP_VPD_PGS_LIST_OFFSET])
             return true;
@@ -579,8 +594,8 @@ bool _sg_is_vpd_page_supported(uint8_t *vpd_0_data, uint8_t page_code) {
     return false;
 }
 
-int _sg_parse_vpd_80(char *err_msg, uint8_t *vpd_data, uint8_t *serial_num,
-                     uint16_t serial_num_max_len) {
+int _sg_parse_vpd_80(char *err_msg, uint8_t *vpd_data, uint16_t vpd_data_len,
+                     uint8_t *serial_num, uint16_t serial_num_max_len) {
     int rc = LSM_ERR_OK;
     struct _sg_t10_vpd80_header *vpd80_header = NULL;
     uint8_t *p = NULL;
@@ -612,7 +627,7 @@ int _sg_parse_vpd_80(char *err_msg, uint8_t *vpd_data, uint8_t *serial_num,
         size_t vpd80_total_len =
             parsed_serial_len + sizeof(struct _sg_t10_vpd80_header);
 
-        if (vpd80_total_len > _SG_T10_SPC_VPD_MAX_LEN) {
+        if (vpd80_total_len > vpd_data_len) {
             rc = LSM_ERR_LIB_BUG;
             _lsm_err_msg_set(
                 err_msg,
@@ -635,7 +650,7 @@ out:
     return rc;
 }
 
-int _sg_parse_vpd_83(char *err_msg, uint8_t *vpd_data,
+int _sg_parse_vpd_83(char *err_msg, uint8_t *vpd_data, uint16_t vpd_data_len,
                      struct _sg_t10_vpd83_dp ***dps, uint16_t *dp_count) {
     int rc = LSM_ERR_OK;
     struct _sg_t10_vpd83_header *vpd83_header = NULL;
@@ -673,7 +688,7 @@ int _sg_parse_vpd_83(char *err_msg, uint8_t *vpd_data,
                 sizeof(struct _sg_t10_vpd83_header);
 
     end_p = vpd_data + vpd83_len - 1;
-    if (end_p >= vpd_data + _SG_T10_SPC_VPD_MAX_LEN) {
+    if (end_p >= vpd_data + vpd_data_len) {
         rc = LSM_ERR_LIB_BUG;
         _lsm_err_msg_set(err_msg,
                          "BUG: Got invalid VPD DI page response, "
@@ -1008,6 +1023,7 @@ int _sg_tp_sas_addr_of_disk(char *err_msg, int fd, char *tp_sas_addr) {
     int rc = LSM_ERR_OK;
     struct _sg_t10_vpd83_dp **dps = NULL;
     uint8_t vpd_di_data[_SG_T10_SPC_VPD_MAX_LEN];
+    uint16_t vpd_di_data_len = 0;
     uint16_t dp_count = 0;
     uint16_t i = 0;
     struct _sg_t10_vpd83_naa_header *naa_header = NULL;
@@ -1016,8 +1032,12 @@ int _sg_tp_sas_addr_of_disk(char *err_msg, int fd, char *tp_sas_addr) {
     assert(fd >= 0);
     assert(tp_sas_addr != NULL);
 
-    _good(_sg_io_vpd(err_msg, fd, _SG_T10_SPC_VPD_DI, vpd_di_data), rc, out);
-    _good(_sg_parse_vpd_83(err_msg, vpd_di_data, &dps, &dp_count), rc, out);
+    _good(_sg_io_vpd(err_msg, fd, _SG_T10_SPC_VPD_DI, vpd_di_data,
+                     &vpd_di_data_len),
+          rc, out);
+    _good(_sg_parse_vpd_83(err_msg, vpd_di_data, vpd_di_data_len, &dps,
+                           &dp_count),
+          rc, out);
 
     memset(tp_sas_addr, 0, _SG_T10_SPL_SAS_ADDR_LEN);
 
