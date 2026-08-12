@@ -296,7 +296,12 @@ static int _sysfs_vpd83_naa_of_sd_name(char *err_msg, const char *sd_name,
     _good(_sysfs_vpd_pg83_data_get(err_msg, sd_name, vpd_data, &read_size), rc,
           out);
 
-    _good(_sg_parse_vpd_83(err_msg, vpd_data, &dps, &dp_count), rc, out);
+    /* _sysfs_vpd_pg83_data_get() zeroed the whole buffer and failed on a read
+     * of _SG_T10_SPC_VPD_MAX_LEN or more, so read_size fits a uint16_t.
+     */
+    _good(_sg_parse_vpd_83(err_msg, vpd_data, (uint16_t)read_size, &dps,
+                           &dp_count),
+          rc, out);
 
     for (; i < dp_count; ++i) {
         if ((dps[i]->header.designator_type ==
@@ -381,7 +386,10 @@ static int _sysfs_serial_num_of_sd_name(char *err_msg, const char *sd_name,
     _good(_sysfs_vpd_pg80_data_get(err_msg, sd_name, vpd_data, &read_size), rc,
           out);
 
-    _good(_sg_parse_vpd_80(err_msg, vpd_data, serial_num,
+    /* _sysfs_vpd_pg80_data_get() zeroed the whole buffer and failed on a read
+     * of _SG_T10_SPC_VPD_MAX_LEN or more, so read_size fits a uint16_t.
+     */
+    _good(_sg_parse_vpd_80(err_msg, vpd_data, (uint16_t)read_size, serial_num,
                            _LSM_MAX_SERIAL_NUM_LEN),
           rc, out);
 
@@ -819,6 +827,7 @@ out:
 int lsm_local_disk_rpm_get(const char *disk_path, int32_t *rpm,
                            lsm_error **lsm_err) {
     uint8_t vpd_data[_SG_T10_SPC_VPD_MAX_LEN];
+    uint16_t vpd_data_len = 0;
     int fd = -1;
     char err_msg[_LSM_ERR_MSG_LEN];
     int rc = LSM_ERR_OK;
@@ -844,8 +853,9 @@ int lsm_local_disk_rpm_get(const char *disk_path, int32_t *rpm,
     }
 
     _good(_sg_io_open_ro(err_msg, disk_path, &fd), rc, out);
-    _good(_sg_io_vpd(err_msg, fd, _SG_T10_SBC_VPD_BLK_DEV_CHA, vpd_data), rc,
-          out);
+    _good(_sg_io_vpd(err_msg, fd, _SG_T10_SBC_VPD_BLK_DEV_CHA, vpd_data,
+                     &vpd_data_len),
+          rc, out);
 
     bdc = (struct t10_sbc_vpd_bdc *)vpd_data;
     if (bdc->pg_code != _SG_T10_SBC_VPD_BLK_DEV_CHA) {
@@ -1082,7 +1092,9 @@ int lsm_local_disk_link_type_get(const char *disk_path,
                                  lsm_disk_link_type *link_type,
                                  lsm_error **lsm_err) {
     unsigned char vpd_sup_data[_SG_T10_SPC_VPD_MAX_LEN];
+    uint16_t vpd_sup_data_len = 0;
     unsigned char vpd_di_data[_SG_T10_SPC_VPD_MAX_LEN];
+    uint16_t vpd_di_data_len = 0;
     int fd = -1;
     char err_msg[_LSM_ERR_MSG_LEN];
     int rc = LSM_ERR_OK;
@@ -1115,18 +1127,23 @@ int lsm_local_disk_link_type_get(const char *disk_path,
     }
 
     _good(_sg_io_open_ro(err_msg, disk_path, &fd), rc, out);
-    _good(_sg_io_vpd(err_msg, fd, _SG_T10_SPC_VPD_SUP_VPD_PGS, vpd_sup_data),
+    _good(_sg_io_vpd(err_msg, fd, _SG_T10_SPC_VPD_SUP_VPD_PGS, vpd_sup_data,
+                     &vpd_sup_data_len),
           rc, out);
 
-    if (_sg_is_vpd_page_supported(vpd_sup_data, _SG_T10_SPC_VPD_ATA_INFO) ==
-        true) {
+    if (_sg_is_vpd_page_supported(vpd_sup_data, vpd_sup_data_len,
+                                  _SG_T10_SPC_VPD_ATA_INFO) == true) {
         *link_type = LSM_DISK_LINK_TYPE_ATA;
         goto out;
     }
 
-    _good(_sg_io_vpd(err_msg, fd, _SG_T10_SPC_VPD_DI, vpd_di_data), rc, out);
+    _good(_sg_io_vpd(err_msg, fd, _SG_T10_SPC_VPD_DI, vpd_di_data,
+                     &vpd_di_data_len),
+          rc, out);
 
-    _good(_sg_parse_vpd_83(err_msg, vpd_di_data, &dps, &dp_count), rc, out);
+    _good(_sg_parse_vpd_83(err_msg, vpd_di_data, vpd_di_data_len, &dps,
+                           &dp_count),
+          rc, out);
 
     for (; i < dp_count; ++i) {
         if ((dps[i]->header.association != _SG_T10_SPC_ASSOCIATION_TGT_PORT) ||
@@ -1572,6 +1589,7 @@ int lsm_local_disk_link_speed_get(const char *disk_path, uint32_t *link_speed,
     int fd = -1;
     char err_msg[_LSM_ERR_MSG_LEN];
     uint8_t vpd_data[_SG_T10_SPC_VPD_MAX_LEN];
+    uint16_t vpd_data_len = 0;
     struct _sg_t10_vpd_ata_info *ata_info = NULL;
     uint8_t sas_mode_sense[_SG_T10_SPC_MODE_SENSE_MAX_LEN];
     char sas_addr[_SG_T10_SPL_SAS_ADDR_LEN];
@@ -1617,8 +1635,9 @@ int lsm_local_disk_link_speed_get(const char *disk_path, uint32_t *link_speed,
     case LSM_DISK_LINK_TYPE_ATA:
         /* Check VPD 0x89(ATA Information VPD page) which is mandatory page */
         _good(_sg_io_open_ro(err_msg, disk_path, &fd), rc, out);
-        _good(_sg_io_vpd(err_msg, fd, _SG_T10_SPC_VPD_ATA_INFO, vpd_data), rc,
-              out);
+        _good(_sg_io_vpd(err_msg, fd, _SG_T10_SPC_VPD_ATA_INFO, vpd_data,
+                         &vpd_data_len),
+              rc, out);
         ata_info = (struct _sg_t10_vpd_ata_info *)vpd_data;
         _good(
             _ata_cur_speed_get(err_msg, ata_info->ata_id_dev_data, link_speed),

@@ -147,9 +147,15 @@ LSM_DLL_LOCAL int _sg_io_open_ro(char *err_msg, const char *disk_path, int *fd);
  *  fd >= 0
  *  data != NULL
  *  data is uint8_t[_SG_T10_SPC_VPD_MAX_LEN]
+ *  data_len != NULL
+ *
+ * The whole 'data' buffer is zeroed before the command is issued. The
+ * ALLOCATION LENGTH sent to the device varies per page and is smaller than the
+ * buffer, so on success '*data_len' holds the number of bytes the device was
+ * allowed to write. Bytes past that are always zero and must not be parsed.
  */
 LSM_DLL_LOCAL int _sg_io_vpd(char *err_msg, int fd, uint8_t page_code,
-                             uint8_t *data);
+                             uint8_t *data, uint16_t *data_len);
 
 /*
  * Preconditions:
@@ -163,11 +169,12 @@ LSM_DLL_LOCAL void _sg_t10_vpd83_dp_array_free(struct _sg_t10_vpd83_dp **dps,
  *  err_msg != NULL
  *  vpd_data != NULL
  *  vpd_data is uint8_t[_SG_T10_SPC_VPD_MAX_LEN]
+ *  vpd_data_len is the count of valid bytes in vpd_data
  *  serial_num != NULL
  *  serial_num_max_len != 0
  */
 LSM_DLL_LOCAL int _sg_parse_vpd_80(char *err_msg, uint8_t *vpd_data,
-                                   uint8_t *serial_num,
+                                   uint16_t vpd_data_len, uint8_t *serial_num,
                                    uint16_t serial_num_max_len);
 
 /*
@@ -175,18 +182,22 @@ LSM_DLL_LOCAL int _sg_parse_vpd_80(char *err_msg, uint8_t *vpd_data,
  *  err_msg != NULL
  *  vpd_data != NULL
  *  vpd_data is uint8_t[_SG_T10_SPC_VPD_MAX_LEN]
+ *  vpd_data_len is the count of valid bytes in vpd_data
  *  dps != NULL
  *  dp_count != NULL
  */
 LSM_DLL_LOCAL int _sg_parse_vpd_83(char *err_msg, uint8_t *vpd_data,
+                                   uint16_t vpd_data_len,
                                    struct _sg_t10_vpd83_dp ***dps,
                                    uint16_t *dp_count);
 /*
  * Preconditions:
  *  vpd_0_data != NULL
  *  vpd_0_data is uint8_t[_SG_T10_SPC_VPD_MAX_LEN]
+ *  vpd_0_data_len is the count of valid bytes in vpd_0_data
  */
 LSM_DLL_LOCAL bool _sg_is_vpd_page_supported(uint8_t *vpd_0_data,
+                                             uint16_t vpd_0_data_len,
                                              uint8_t page_code);
 
 /*
