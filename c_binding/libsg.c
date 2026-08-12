@@ -701,7 +701,7 @@ static int _sg_io_v4(int fd, uint8_t *cdb, uint8_t cdb_len, uint8_t *data,
 int _sg_io_vpd(char *err_msg, int fd, uint8_t page_code, uint8_t *data,
                uint16_t *data_len) {
     int rc = LSM_ERR_OK;
-    uint8_t vpd_00_data[_SG_T10_SPC_VPD_MAX_LEN];
+    uint8_t *vpd_00_data = NULL;
     uint16_t vpd_00_data_len = 0;
     uint8_t cdb[_T10_SPC_INQUIRY_CMD_LEN];
     uint8_t sense_data[_T10_SPC_SENSE_DATA_MAX_LENGTH];
@@ -771,7 +771,16 @@ int _sg_io_vpd(char *err_msg, int fd, uint8_t page_code, uint8_t *data,
         }
         if (ioctl_errno == -1) {
             if (sense_key == _T10_SPC_SENSE_KEY_ILLEGAL_REQUEST) {
-                /* Check whether provided page is supported */
+                /* Check whether provided page is supported. Only this path
+                 * needs the buffer, and getting here means recursing once
+                 * into a function that already holds a 64KiB one, so keep it
+                 * off the stack.
+                 */
+                vpd_00_data = (uint8_t *)malloc(_SG_T10_SPC_VPD_MAX_LEN);
+                if (vpd_00_data == NULL) {
+                    rc = LSM_ERR_NO_MEMORY;
+                    goto out;
+                }
                 rc_vpd_00 = _sg_io_vpd(err_msg, fd, _SG_T10_SPC_VPD_SUP_VPD_PGS,
                                        vpd_00_data, &vpd_00_data_len);
                 if (rc_vpd_00 != 0) {
@@ -825,6 +834,7 @@ int _sg_io_vpd(char *err_msg, int fd, uint8_t page_code, uint8_t *data,
     }
 
 out:
+    free(vpd_00_data);
 
     return rc;
 }
