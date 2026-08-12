@@ -63,6 +63,11 @@
 /* SPC-5 rev 07 Table 300 - Summary of log page codes */
 #define _T10_SPC_INFO_EXCEP_PAGE_CODE 0x2f
 
+/* SPC-5 rev 07 Table 349 - Informational Exceptions General log parameter */
+#define _T10_SPC_INFO_EXCEP_GENERAL_PARAM_CODE 0x0000
+/* The PARAMETER LENGTH has to cover at least ASC and ASCQ for us to use it */
+#define _T10_SPC_INFO_EXCEP_GENERAL_PARAM_MIN_LEN 2
+
 /* SPC-5 rev 07 Table 151 - Page control (PC) field */
 #define PAGE_CONTROL_CUMULATIVE_VALS 0x01
 
@@ -249,8 +254,14 @@ struct _sg_t10_info_excep_mode_page_0_hdr {
 #endif
 };
 
+/* SPC-5 rev 07 Table 349 - Informational Exceptions General log parameter.
+ * The leading fields are the standard log parameter header of SPC-5 rev 07
+ * Table 314 - Log parameter.
+ */
 struct _sg_t10_info_excep_general_log_hdr {
-    uint8_t dont_care[4];
+    uint16_t param_code_be;
+    uint8_t we_dont_care_0;
+    uint8_t param_len;
     uint8_t asc;
     uint8_t ascq;
 };
@@ -353,10 +364,29 @@ static int _extract_ata_sense_data(char *err_msg, uint8_t *sense_data,
  *  err_msg != NULL
  *  fd >= 0
  *  data != NULL
- *  data is uint8_t[_SG_T10_SPC_LOG_SENSE_MAX_LEN]
+ *  data is uint8_t[_T10_SPC_LOG_SENSE_MAX_LEN]
+ *  data_len != NULL
+ *
+ * The log page header is stripped, so 'data' starts at the first log
+ * parameter. The whole buffer is zeroed and on success '*data_len' holds the
+ * number of log parameter bytes the device returned.
  */
 static int _sg_log_sense(char *err_msg, int fd, uint8_t page_code,
-                         uint8_t sub_page_code, uint8_t *data);
+                         uint8_t sub_page_code, uint8_t *data,
+                         uint16_t *data_len);
+
+/*
+ * Pull the ADDITIONAL SENSE CODE out of the Informational Exceptions General
+ * log parameter, which _sg_log_sense() leaves at the start of 'log_data'.
+ * Preconditions:
+ *  err_msg != NULL
+ *  log_data != NULL
+ *  log_data_len is the count of valid bytes in log_data
+ *  asc != NULL
+ * Return LSM_ERR_NO_SUPPORT if the drive did not return a usable parameter.
+ */
+static int _info_excep_log_asc_get(char *err_msg, uint8_t *log_data,
+                                   uint16_t log_data_len, uint8_t *asc);
 
 static int _sg_io_v3(int fd, uint8_t *cdb, uint8_t cdb_len, uint8_t *data,
                      ssize_t data_len, uint8_t *sense_data, int direction) {
@@ -1327,7 +1357,8 @@ out:
 }
 
 static int _sg_log_sense(char *err_msg, int fd, uint8_t page_code,
-                         uint8_t sub_page_code, uint8_t *data) {
+                         uint8_t sub_page_code, uint8_t *data,
+                         uint16_t *data_len) {
     int rc = LSM_ERR_OK;
     uint8_t tmp_data[_T10_SPC_LOG_SENSE_MAX_LEN];
     uint8_t cdb[_T10_SPC_LOG_SENSE_CMD_LEN];
@@ -1342,9 +1373,17 @@ static int _sg_log_sense(char *err_msg, int fd, uint8_t page_code,
     assert(err_msg != NULL);
     assert(fd >= 0);
     assert(data != NULL);
+    assert(data_len != NULL);
 
     memset(sense_err_msg, 0, sizeof(sense_err_msg));
     memset(cdb, 0, _T10_SPC_LOG_SENSE_CMD_LEN);
+    *data_len = 0;
+
+    /* We only copy out the log parameters the device actually returned, so
+     * zero the rest of the caller's buffer instead of leaving it holding
+     * whatever was on the stack.
+     */
+    memset(data, 0, _T10_SPC_LOG_SENSE_MAX_LEN);
 
     cdb[0] = LOG_SENSE;
     cdb[2] = (PAGE_CONTROL_CUMULATIVE_VALS << 6) | (page_code & 0x3f);
@@ -1388,10 +1427,59 @@ static int _sg_log_sense(char *err_msg, int fd, uint8_t page_code,
         goto out;
     }
     memcpy(data, tmp_data + sizeof(struct _sg_t10_log_para_hdr), log_data_len);
+    *data_len = log_data_len;
 
 out:
 
     return rc;
+}
+
+static int _info_excep_log_asc_get(char *err_msg, uint8_t *log_data,
+                                   uint16_t log_data_len, uint8_t *asc) {
+    struct _sg_t10_info_excep_general_log_hdr *ie_log_hdr = NULL;
+
+    assert(err_msg != NULL);
+    assert(log_data != NULL);
+    assert(asc != NULL);
+
+    /* SPC-5 rev 07 Table 349 - Informational Exceptions General log
+     * parameter
+     */
+    if (log_data_len < sizeof(struct _sg_t10_info_excep_general_log_hdr)) {
+        _lsm_err_msg_set(
+            err_msg,
+            "SCSI Informational Exceptions log page is too short to hold the "
+            "general parameter: got %" PRIu16 " bytes, need at least %zu",
+            log_data_len, sizeof(struct _sg_t10_info_excep_general_log_hdr));
+        return LSM_ERR_NO_SUPPORT;
+    }
+
+    ie_log_hdr = (struct _sg_t10_info_excep_general_log_hdr *)log_data;
+
+    /* The general parameter is defined to come first. Reading ASC out of
+     * whatever else a drive chose to lead with would be meaningless.
+     */
+    if (be16toh(ie_log_hdr->param_code_be) !=
+        _T10_SPC_INFO_EXCEP_GENERAL_PARAM_CODE) {
+        _lsm_err_msg_set(err_msg,
+                         "SCSI Informational Exceptions log page does not "
+                         "start with the general parameter, got parameter "
+                         "code 0x%04" PRIx16,
+                         be16toh(ie_log_hdr->param_code_be));
+        return LSM_ERR_NO_SUPPORT;
+    }
+
+    if (ie_log_hdr->param_len < _T10_SPC_INFO_EXCEP_GENERAL_PARAM_MIN_LEN) {
+        _lsm_err_msg_set(
+            err_msg,
+            "SCSI Informational Exceptions General log parameter "
+            "is too short: PARAMETER LENGTH %" PRIu8 ", need at least %d",
+            ie_log_hdr->param_len, _T10_SPC_INFO_EXCEP_GENERAL_PARAM_MIN_LEN);
+        return LSM_ERR_NO_SUPPORT;
+    }
+
+    *asc = ie_log_hdr->asc;
+    return LSM_ERR_OK;
 }
 
 int _sg_request_sense(char *err_msg, int fd, uint8_t *returned_sense_data) {
@@ -1469,11 +1557,11 @@ int _sg_sas_health_status(char *err_msg, int fd, int32_t *health_status) {
     int rc = LSM_ERR_OK;
     uint8_t info_excep_mode_page[_SG_T10_SPC_MODE_SENSE_MAX_LEN];
     uint8_t info_excep_log_page[_T10_SPC_LOG_SENSE_MAX_LEN];
+    uint16_t info_excep_log_page_len = 0;
     uint8_t asc = 0;
     uint8_t requested_sense[_T10_SPC_SENSE_DATA_MAX_LENGTH];
     struct _sg_t10_sense_fixed *sense_fixed = NULL;
     struct _sg_t10_info_excep_mode_page_0_hdr *ie_mode_hdr = NULL;
-    struct _sg_t10_info_excep_general_log_hdr *ie_log_hdr = NULL;
 
     _good(_sg_io_mode_sense(err_msg, fd, INFO_EXCEP_CONTROL_PAGE, 0,
                             info_excep_mode_page),
@@ -1487,13 +1575,11 @@ int _sg_sas_health_status(char *err_msg, int fd, int32_t *health_status) {
         asc = sense_fixed->asc;
     } else {
         _good(_sg_log_sense(err_msg, fd, _T10_SPC_INFO_EXCEP_PAGE_CODE, 0,
-                            info_excep_log_page),
+                            info_excep_log_page, &info_excep_log_page_len),
               rc, out);
-        // SPC5 rev 07 - Table 349 - Informational Exceptions General log
-        // parameter
-        ie_log_hdr =
-            (struct _sg_t10_info_excep_general_log_hdr *)info_excep_log_page;
-        asc = ie_log_hdr->asc;
+        _good(_info_excep_log_asc_get(err_msg, info_excep_log_page,
+                                      info_excep_log_page_len, &asc),
+              rc, out);
     }
 
     *health_status = _sg_info_excep_interpret_asc(asc);
