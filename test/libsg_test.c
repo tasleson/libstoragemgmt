@@ -77,12 +77,15 @@ START_TEST(test_vpd83_length_fields) {
     } cases[] = {
         /* PAGE LENGTH + sizeof(header) overflows a uint16_t. This used to
          * wrap to a small value and quietly report zero designators. */
-        {"page_len wraps on +sizeof(header)", 0xfffc, 252, LSM_ERR_LIB_BUG, 0},
-        {"page_len wraps to exactly zero", 0xfffb + 1, 252, LSM_ERR_LIB_BUG, 0},
+        {"page_len wraps on +sizeof(header)", 0xfffc, 252, LSM_ERR_DEVICE_BUG,
+         0},
+        {"page_len wraps to exactly zero", 0xfffb + 1, 252, LSM_ERR_DEVICE_BUG,
+         0},
         /* The device claims far more than it was ever asked for. Walking that
          * far builds designators out of the caller's stack. */
-        {"page_len beyond transferred length", 0x1000, 252, LSM_ERR_LIB_BUG, 0},
-        {"page_len one byte too long", 249, 252, LSM_ERR_LIB_BUG, 0},
+        {"page_len beyond transferred length", 0x1000, 252, LSM_ERR_DEVICE_BUG,
+         0},
+        {"page_len one byte too long", 249, 252, LSM_ERR_DEVICE_BUG, 0},
         {"page_len exactly fills the transfer", 248, 252, LSM_ERR_OK, 31},
         {"page_len well inside the transfer", 8, 252, LSM_ERR_OK, 1},
         {"empty page", 0, 252, LSM_ERR_OK, 0},
@@ -102,6 +105,8 @@ START_TEST(test_vpd83_length_fields) {
 
         rc = _sg_parse_vpd_83(err_msg, buf, cases[i].data_len, &dps, &dp_count);
 
+        /* The exact code matters: a device sending contradictory lengths is
+         * LSM_ERR_DEVICE_BUG, not the library's fault. */
         ck_assert_msg(rc == cases[i].expect_rc,
                       "%s: expected rc %d, got %d (%s)", cases[i].name,
                       cases[i].expect_rc, rc, err_msg);
@@ -191,7 +196,7 @@ START_TEST(test_vpd80_length_fields) {
     vpd_hdr_set(buf, _SG_T10_SPC_VPD_UNIT_SN, 0x1000);
     ck_assert_int_eq(
         _sg_parse_vpd_80(err_msg, buf, 252, serial, sizeof(serial)),
-        LSM_ERR_LIB_BUG);
+        LSM_ERR_DEVICE_BUG);
 
     memset(buf, POISON, sizeof(buf));
     vpd_hdr_set(buf, _SG_T10_SPC_VPD_UNIT_SN, 0);
