@@ -376,6 +376,16 @@ static int _sg_log_sense(char *err_msg, int fd, uint8_t page_code,
                          uint16_t *data_len);
 
 /*
+ * The ADDITIONAL SENSE CODE sits at a different offset in each of the two
+ * sense data formats, so the response code has to be consulted first.
+ * Preconditions:
+ *  sense_data is uint8_t[_T10_SPC_SENSE_DATA_MAX_LENGTH]
+ *  asc != NULL
+ * Return 0 on success, -1 if the response code is not a known format.
+ */
+static int _sense_data_asc_get(uint8_t *sense_data, uint8_t *asc);
+
+/*
  * Pull the ADDITIONAL SENSE CODE out of the Informational Exceptions General
  * log parameter, which _sg_log_sense() leaves at the start of 'log_data'.
  * Preconditions:
@@ -1482,6 +1492,28 @@ static int _info_excep_log_asc_get(char *err_msg, uint8_t *log_data,
     return LSM_ERR_OK;
 }
 
+static int _sense_data_asc_get(uint8_t *sense_data, uint8_t *asc) {
+    struct _sg_t10_sense_header *sense_hdr = NULL;
+
+    assert(sense_data != NULL);
+    assert(asc != NULL);
+
+    sense_hdr = (struct _sg_t10_sense_header *)sense_data;
+
+    switch (sense_hdr->response_code) {
+    case _T10_SPC_SENSE_REPORT_TYPE_CUR_INFO_FIXED:
+    case _T10_SPC_SENSE_REPORT_TYPE_DEF_ERR_FIXED:
+        *asc = ((struct _sg_t10_sense_fixed *)sense_data)->asc;
+        return 0;
+    case _T10_SPC_SENSE_REPORT_TYPE_CUR_INFO_DP:
+    case _T10_SPC_SENSE_REPORT_TYPE_DEF_ERR_DP:
+        *asc = ((struct _sg_t10_sense_dp *)sense_data)->asc;
+        return 0;
+    default:
+        return -1;
+    }
+}
+
 int _sg_request_sense(char *err_msg, int fd, uint8_t *returned_sense_data) {
     int rc = LSM_ERR_OK;
     uint8_t request_sense[_T10_SPC_REQUEST_SENSE_MAX_LEN];
@@ -1560,7 +1592,7 @@ int _sg_sas_health_status(char *err_msg, int fd, int32_t *health_status) {
     uint16_t info_excep_log_page_len = 0;
     uint8_t asc = 0;
     uint8_t requested_sense[_T10_SPC_SENSE_DATA_MAX_LENGTH];
-    struct _sg_t10_sense_fixed *sense_fixed = NULL;
+    struct _sg_t10_sense_header *sense_hdr = NULL;
     struct _sg_t10_info_excep_mode_page_0_hdr *ie_mode_hdr = NULL;
 
     _good(_sg_io_mode_sense(err_msg, fd, INFO_EXCEP_CONTROL_PAGE, 0,
@@ -1571,8 +1603,19 @@ int _sg_sas_health_status(char *err_msg, int fd, int32_t *health_status) {
 
     if (ie_mode_hdr->mrie == MRIE_REPORT_INFO_EXCEP_ON_REQUEST) {
         _good(_sg_request_sense(err_msg, fd, requested_sense), rc, out);
-        sense_fixed = (struct _sg_t10_sense_fixed *)requested_sense;
-        asc = sense_fixed->asc;
+        /* Drives with D_SENSE set answer in descriptor format, where the
+         * ADDITIONAL SENSE CODE is nowhere near where the fixed format keeps
+         * it, so the response code decides how to read this.
+         */
+        if (_sense_data_asc_get(requested_sense, &asc) != 0) {
+            sense_hdr = (struct _sg_t10_sense_header *)requested_sense;
+            rc = LSM_ERR_NO_SUPPORT;
+            _lsm_err_msg_set(err_msg,
+                             "Got SCSI REQUEST SENSE data with unknown "
+                             "response code 0x%02x",
+                             sense_hdr->response_code);
+            goto out;
+        }
     } else {
         _good(_sg_log_sense(err_msg, fd, _T10_SPC_INFO_EXCEP_PAGE_CODE, 0,
                             info_excep_log_page, &info_excep_log_page_len),
