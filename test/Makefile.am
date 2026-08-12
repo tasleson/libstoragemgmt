@@ -7,9 +7,9 @@ EXTRA_DIST=cmdtest.py plugin_test.py test_include.sh runtests.sh.in integration.
 	test_daemon_conn_limit.py lsm_stub.py conftest.py devel_env.sh docker_ci_test.sh
 
 if WITH_TEST
-all: tester test_ipc test_conn_limit
+all: tester test_ipc test_conn_limit libsg_test
 
-check_PROGRAMS = tester test_ipc test_conn_limit
+check_PROGRAMS = tester test_ipc test_conn_limit libsg_test
 tester_CFLAGS = $(LIBCHECK_CFLAGS)
 tester_LDADD = ../c_binding/libstoragemgmt.la $(LIBCHECK_LIBS)
 tester_SOURCES = tester.c
@@ -28,4 +28,14 @@ test_conn_limit_CFLAGS = $(LIBCHECK_CFLAGS) -I$(top_srcdir)/daemon
 test_conn_limit_LDADD = $(LIBCHECK_LIBS)
 test_conn_limit_SOURCES = test_conn_limit.c ../daemon/conn_limit.c \
 	../daemon/conn_limit.h
+
+# libsg_test includes c_binding/libsg.c rather than linking the shared
+# library: the response parsing it covers is static to that translation unit,
+# and the rest is hidden visibility. It needs no device and no daemon.
+libsg_test_CFLAGS = $(LIBCHECK_CFLAGS)
+libsg_test_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/c_binding
+libsg_test_LDADD = $(LIBCHECK_LIBS)
+libsg_test_SOURCES = libsg_test.c \
+	$(top_srcdir)/c_binding/utils.c \
+	$(top_srcdir)/c_binding/libata.c
 endif
