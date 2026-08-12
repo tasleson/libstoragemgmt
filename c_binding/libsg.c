@@ -581,6 +581,12 @@ bool _sg_is_vpd_page_supported(uint8_t *vpd_0_data, uint16_t vpd_0_data_len,
 
     assert(vpd_0_data != NULL);
 
+    /* Without the page header plus at least one page code there is nothing to
+     * search.
+     */
+    if (vpd_0_data_len < sizeof(struct _sg_t10_vpd00))
+        return false;
+
     vpd00 = (struct _sg_t10_vpd00 *)vpd_0_data;
 
     supported_list_len = be16toh(vpd00->page_len_be);
@@ -607,6 +613,15 @@ int _sg_parse_vpd_80(char *err_msg, uint8_t *vpd_data, uint16_t vpd_data_len,
 
     memset(serial_num, 0, serial_num_max_len);
 
+    if (vpd_data_len < sizeof(struct _sg_t10_vpd80_header)) {
+        rc = LSM_ERR_NO_SUPPORT;
+        _lsm_err_msg_set(err_msg,
+                         "Got truncated SCSI VPD UNIT SN page: %" PRIu16
+                         " bytes, need at least %zu",
+                         vpd_data_len, sizeof(struct _sg_t10_vpd80_header));
+        goto out;
+    }
+
     vpd80_header = (struct _sg_t10_vpd80_header *)vpd_data;
 
     if (vpd80_header->page_code != _SG_T10_SPC_VPD_UNIT_SN) {
@@ -629,10 +644,11 @@ int _sg_parse_vpd_80(char *err_msg, uint8_t *vpd_data, uint16_t vpd_data_len,
 
         if (vpd80_total_len > vpd_data_len) {
             rc = LSM_ERR_LIB_BUG;
-            _lsm_err_msg_set(
-                err_msg,
-                "BUG: Got invalid VPD UNIT SN page response, "
-                "data length exceeded the maximum size of a legal VPD page");
+            _lsm_err_msg_set(err_msg,
+                             "BUG: Got invalid VPD UNIT SN page response, PAGE "
+                             "LENGTH claims %zu bytes but only %" PRIu16
+                             " were transferred",
+                             vpd80_total_len, vpd_data_len);
             goto out;
         }
 
@@ -659,7 +675,7 @@ int _sg_parse_vpd_83(char *err_msg, uint8_t *vpd_data, uint16_t vpd_data_len,
     struct _sg_t10_vpd83_dp_header *dp_header = NULL;
     struct _sg_t10_vpd83_dp *dp = NULL;
     uint16_t i = 0;
-    uint16_t vpd83_len = 0;
+    size_t vpd83_len = 0;
 
     assert(err_msg != NULL);
     assert(vpd_data != NULL);
@@ -668,6 +684,15 @@ int _sg_parse_vpd_83(char *err_msg, uint8_t *vpd_data, uint16_t vpd_data_len,
 
     *dps = NULL;
     *dp_count = 0;
+
+    if (vpd_data_len < sizeof(struct _sg_t10_vpd83_header)) {
+        rc = LSM_ERR_NO_SUPPORT;
+        _lsm_err_msg_set(err_msg,
+                         "Got truncated SCSI VPD DI page: %" PRIu16
+                         " bytes, need at least %zu",
+                         vpd_data_len, sizeof(struct _sg_t10_vpd83_header));
+        goto out;
+    }
 
     vpd83_header = (struct _sg_t10_vpd83_header *)vpd_data;
 
@@ -684,18 +709,24 @@ int _sg_parse_vpd_83(char *err_msg, uint8_t *vpd_data, uint16_t vpd_data_len,
         goto out;
     }
 
-    vpd83_len = be16toh(vpd83_header->page_len_be) +
+    /* PAGE LENGTH excludes the header and is itself 16 bit, so the total can
+     * exceed UINT16_MAX. Keep the sum wide or it wraps and we silently report
+     * no designators at all.
+     */
+    vpd83_len = (size_t)be16toh(vpd83_header->page_len_be) +
                 sizeof(struct _sg_t10_vpd83_header);
 
-    end_p = vpd_data + vpd83_len - 1;
-    if (end_p >= vpd_data + vpd_data_len) {
+    if (vpd83_len > vpd_data_len) {
         rc = LSM_ERR_LIB_BUG;
         _lsm_err_msg_set(err_msg,
-                         "BUG: Got invalid VPD DI page response, "
-                         "data length exceeded the maximum size of a legal VPD "
-                         "data");
+                         "BUG: Got invalid VPD DI page response, PAGE LENGTH "
+                         "claims %zu bytes but only %" PRIu16
+                         " were transferred",
+                         vpd83_len, vpd_data_len);
         goto out;
     }
+
+    end_p = vpd_data + vpd83_len - 1;
     p = vpd_data + sizeof(struct _sg_t10_vpd83_header);
 
     /* First loop finds out how many IDs we have */
