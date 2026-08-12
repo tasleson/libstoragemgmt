@@ -404,6 +404,22 @@ static void _sg_io_v4_status_get(struct sg_io_v4 *io_hdr,
                                  struct _sg_io_status *io_status);
 
 /*
+ * Fold benign sense data into success. A drive is free to return sense
+ * alongside a command that did exactly what was asked of it, a recovered
+ * error being the obvious case, and the data it sent back is still good.
+ * Takes and returns an _sg_io_v3()/_sg_io_v4() return value: -1 becomes 0
+ * when the sense turns out to be benign, anything else is passed through. On
+ * a -1 that stays -1 the sense data has been decoded, so 'sense_err_msg' and
+ * 'sense_key' are set for the caller.
+ * Preconditions:
+ *  sense_data is uint8_t[_T10_SPC_SENSE_DATA_MAX_LENGTH]
+ *  sense_err_msg is char[_LSM_ERR_MSG_LEN / 2]
+ *  sense_key != NULL
+ */
+static int _sg_io_resolve_sense(int ioctl_errno, uint8_t *sense_data,
+                                char *sense_err_msg, uint8_t *sense_key);
+
+/*
  * Render an _sg_io_v3()/_sg_io_v4() return value for an error message. The -1
  * meaning "got sense data" is not an errno and must not reach strerror().
  * Preconditions:
@@ -529,6 +545,21 @@ static void _sg_io_v4_status_get(struct sg_io_v4 *io_hdr,
     }
 
     io_status->completed = io_hdr->device_status == _T10_SAM_STATUS_GOOD;
+}
+
+static int _sg_io_resolve_sense(int ioctl_errno, uint8_t *sense_data,
+                                char *sense_err_msg, uint8_t *sense_key) {
+    assert(sense_data != NULL);
+    assert(sense_err_msg != NULL);
+    assert(sense_key != NULL);
+
+    if (ioctl_errno != -1)
+        return ioctl_errno;
+
+    if (_check_sense_data(sense_err_msg, sense_data, sense_key) == 0)
+        return 0;
+
+    return -1;
 }
 
 static const char *_sg_io_err_str(int ioctl_errno,
@@ -729,6 +760,8 @@ int _sg_io_vpd(char *err_msg, int fd, uint8_t page_code, uint8_t *data,
 
     ioctl_errno = _sg_io_v3(fd, cdb, _T10_SPC_INQUIRY_CMD_LEN, data, alloc_len,
                             sense_data, _SG_IO_RECV_DATA, &io_status);
+    ioctl_errno = _sg_io_resolve_sense(ioctl_errno, sense_data, sense_err_msg,
+                                       &sense_key);
 
     if (ioctl_errno != 0) {
         if (page_code == _SG_T10_SPC_VPD_SUP_VPD_PGS) {
@@ -736,7 +769,7 @@ int _sg_io_vpd(char *err_msg, int fd, uint8_t page_code, uint8_t *data,
             rc = LSM_ERR_NO_SUPPORT;
             goto out;
         }
-        if (_check_sense_data(sense_err_msg, sense_data, &sense_key) != 0) {
+        if (ioctl_errno == -1) {
             if (sense_key == _T10_SPC_SENSE_KEY_ILLEGAL_REQUEST) {
                 /* Check whether provided page is supported */
                 rc_vpd_00 = _sg_io_vpd(err_msg, fd, _SG_T10_SPC_VPD_SUP_VPD_PGS,
@@ -1198,10 +1231,10 @@ int _sg_io_recv_diag(char *err_msg, int fd, uint8_t page_code, uint8_t *data) {
                             _SG_T10_SPC_RECV_DIAG_MAX_LEN, sense_data,
                             _SG_IO_RECV_DATA, &io_status);
     /* TODO(Gris Ge): Check 'Supported Diagnostic Pages diagnostic page' */
+    ioctl_errno = _sg_io_resolve_sense(ioctl_errno, sense_data, sense_err_msg,
+                                       &sense_key);
     if (ioctl_errno != 0) {
         rc = LSM_ERR_LIB_BUG;
-        /* TODO(Gris Ge): Check 'Supported Diagnostic Pages diagnostic page' */
-        _check_sense_data(sense_err_msg, sense_data, &sense_key);
 
         _lsm_err_msg_set(err_msg,
                          "Got error from SGIO RECEIVE_DIAGNOSTIC "
@@ -1254,10 +1287,10 @@ int _sg_io_send_diag(char *err_msg, int fd, uint8_t *data, uint16_t data_len) {
     ioctl_errno = _sg_io_v4(fd, cdb, _T10_SPC_SEND_DIAG_CMD_LEN, data, data_len,
                             sense_data, _SG_IO_SEND_DATA, &io_status);
     /* TODO(Gris Ge): No idea why this could fail */
+    ioctl_errno = _sg_io_resolve_sense(ioctl_errno, sense_data, sense_err_msg,
+                                       &sense_key);
     if (ioctl_errno != 0) {
         rc = LSM_ERR_LIB_BUG;
-        /* TODO(Gris Ge): No idea why this could fail */
-        _check_sense_data(sense_err_msg, sense_data, &sense_key);
 
         _lsm_err_msg_set(err_msg,
                          "Got error from SGIO SEND_DIAGNOSTIC "
@@ -1370,6 +1403,8 @@ int _sg_io_mode_sense(char *err_msg, int fd, uint8_t page_code,
     ioctl_errno = _sg_io_v3(fd, cdb, _T10_SPC_MODE_SENSE_CMD_LEN, tmp_data,
                             _SG_T10_SPC_MODE_SENSE_MAX_LEN, sense_data,
                             _SG_IO_RECV_DATA, &io_status);
+    ioctl_errno = _sg_io_resolve_sense(ioctl_errno, sense_data, sense_err_msg,
+                                       &sense_key);
 
     if (ioctl_errno == 0) {
         mode_hdr = (struct _sg_t10_mode_para_hdr *)tmp_data;
@@ -1418,7 +1453,7 @@ int _sg_io_mode_sense(char *err_msg, int fd, uint8_t page_code,
         goto out;
     }
 
-    if (_check_sense_data(sense_err_msg, sense_data, &sense_key) != 0) {
+    if (ioctl_errno == -1) {
         if (sense_key == _T10_SPC_SENSE_KEY_ILLEGAL_REQUEST) {
             rc = LSM_ERR_NO_SUPPORT;
             _lsm_err_msg_set(err_msg,
@@ -1587,10 +1622,11 @@ static int _sg_log_sense(char *err_msg, int fd, uint8_t page_code,
     ioctl_errno = _sg_io_v3(fd, cdb, _T10_SPC_LOG_SENSE_CMD_LEN, tmp_data,
                             _T10_SPC_LOG_SENSE_MAX_LEN, sense_data,
                             _SG_IO_RECV_DATA, &io_status);
+    ioctl_errno = _sg_io_resolve_sense(ioctl_errno, sense_data, sense_err_msg,
+                                       &sense_key);
 
     if (ioctl_errno != 0) {
         rc = LSM_ERR_LIB_BUG;
-        _check_sense_data(sense_err_msg, sense_data, &sense_key);
 
         if (sense_key == _T10_SPC_SENSE_KEY_ILLEGAL_REQUEST) {
             rc = LSM_ERR_NO_SUPPORT;
@@ -1719,10 +1755,11 @@ int _sg_request_sense(char *err_msg, int fd, uint8_t *returned_sense_data) {
     ioctl_errno = _sg_io_v3(fd, cdb, _T10_SPC_REQUEST_SENSE_CMD_LEN,
                             request_sense, _T10_SPC_REQUEST_SENSE_MAX_LEN,
                             sense_data, _SG_IO_RECV_DATA, &io_status);
+    ioctl_errno = _sg_io_resolve_sense(ioctl_errno, sense_data, sense_err_msg,
+                                       &sense_key);
 
     if (ioctl_errno != 0) {
         rc = LSM_ERR_LIB_BUG;
-        _check_sense_data(sense_err_msg, sense_data, &sense_key);
 
         if (sense_key == _T10_SPC_SENSE_KEY_ILLEGAL_REQUEST) {
             rc = LSM_ERR_NO_SUPPORT;
