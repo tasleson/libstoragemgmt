@@ -7,6 +7,8 @@
 import json
 import socket
 import os
+import struct
+import time
 import unittest
 import threading
 
@@ -14,6 +16,9 @@ from lsm._common import LsmError, ErrorNumber
 from lsm._common import SocketEOF as _SocketEOF
 from lsm._data import DataDecoder as _DataDecoder
 from lsm._data import DataEncoder as _DataEncoder
+
+# A zeroed struct timeval, which clears SO_RCVTIMEO.
+_TIMEVAL_CLEAR = struct.pack("@ll", 0, 0)
 
 
 class TransPort(object):
@@ -35,10 +40,12 @@ class TransPort(object):
     # Matches the overflow guard in c_binding/lsm_ipc.cpp Transport::msg_recv
     MAX_MSG_LEN = 0x80000000
 
-    def _read_all(self, l):
+    def _read_all(self, l, deadline=None):
         """
         Reads l number of bytes before returning.  Will raise a SocketEOF
-        if socket returns zero bytes (i.e. socket no longer connected)
+        if socket returns zero bytes (i.e. socket no longer connected), or
+        socket.timeout if deadline (a time.monotonic() value) passes before
+        the read completes.
         """
 
         if l < 1:
@@ -50,6 +57,11 @@ class TransPort(object):
             if not r:
                 raise _SocketEOF()
             data += r
+            # Only give up while the read is still short; a message whose
+            # last chunk lands on the deadline is complete and usable.
+            if deadline is not None and len(data) < l \
+                    and time.monotonic() > deadline:
+                raise socket.timeout("timed out")
 
         return data.decode("utf-8")
 
@@ -73,15 +85,29 @@ class TransPort(object):
         bytes of the message.
         """
         try:
-            num_bytes = self._read_all(self.HDR_LEN)
+            # settimeout() bounds a single recv() call, not the time spent
+            # reading a whole message: a peer trickling bytes in just inside
+            # the timeout could hold the read open forever.  One deadline
+            # spans the header and the payload, so the configured timeout
+            # means what it says rather than applying twice per message.
+            timeout = self.s.gettimeout()
+            deadline = (time.monotonic() + timeout
+                        if timeout is not None else None)
+
+            num_bytes = self._read_all(self.HDR_LEN, deadline)
             length = int(num_bytes)
             if length >= self.MAX_MSG_LEN:
                 raise LsmError(
                     ErrorNumber.TRANSPORT_COMMUNICATION,
                     "Message length of %d exceeds maximum allowed of %d" %
                     (length, self.MAX_MSG_LEN))
-            msg = self._read_all(length)
+            msg = self._read_all(length, deadline)
             # common.Info("RECV: ", msg)
+        except socket.timeout:
+            # A receive timeout is distinct from a generic communication
+            # error; let it propagate so the caller can act on it (e.g. a
+            # plug-in giving up on an un-registered client).
+            raise
         except socket.error as e:
             raise LsmError(ErrorNumber.TRANSPORT_COMMUNICATION,
                            "Error while reading a message from the plug-in",
@@ -94,6 +120,21 @@ class TransPort(object):
 
     def __init__(self, socket_descriptor):
         self.s = socket_descriptor
+
+    def set_recv_timeout(self, seconds):
+        """
+        Sets (or clears) a receive timeout on the underlying socket.  Pass
+        None to clear the timeout and return to blocking behavior.
+        """
+        self.s.settimeout(seconds)
+        if seconds is None:
+            # settimeout() only manages O_NONBLOCK, so any SO_RCVTIMEO lsmd
+            # set on this descriptor before fork() survives it and a blocking
+            # recv() would still expire - as BlockingIOError rather than
+            # socket.timeout.  Clear it, or an established session that sits
+            # idle past the initial timeout gets torn down.
+            self.s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVTIMEO,
+                              _TIMEVAL_CLEAR)
 
     @staticmethod
     def get_socket(path):
@@ -278,6 +319,100 @@ class _TestTransport(unittest.TestCase):
 
             reply, msg_id = self.client.read_resp()
             self.assertTrue(payload == reply)
+
+    def test_recv_timeout(self):
+        # With a receive timeout set, an incomplete (or absent) frame must
+        # surface as socket.timeout rather than being folded into a generic
+        # LsmError, so callers (e.g. a plug-in waiting on an un-registered
+        # client) can react to it.  b'' exercises a stalled header read;
+        # b'00000' exercises a partial header.
+        for partial in (b'', b'00000'):
+            c, s = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                client = TransPort(c)
+                client.set_recv_timeout(0.25)
+                if partial:
+                    s.sendall(partial)
+                self.assertRaises(socket.timeout, client._recv_msg)
+                # Clearing the timeout returns to blocking behavior.
+                client.set_recv_timeout(None)
+                self.assertIsNone(c.gettimeout())
+            finally:
+                c.close()
+                s.close()
+
+    def test_recv_timeout_drip(self):
+        # A peer declares a 50 byte payload, then keeps sending a trickle of
+        # payload bytes one at a time, each arriving well inside the
+        # configured timeout, but never enough to complete the declared
+        # payload. The timeout must bound the whole read, not just each
+        # individual recv() call, otherwise this drip defeats it and
+        # _recv_msg() never raises.
+        c, s = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            client = TransPort(c)
+            client.set_recv_timeout(0.3)
+
+            def drip():
+                try:
+                    s.sendall(b'0000000050')
+                except OSError:
+                    return
+                for _ in range(8):
+                    try:
+                        s.sendall(b'x')
+                    except OSError:
+                        return
+                    time.sleep(0.15)
+
+            dripper = threading.Thread(target=drip)
+            dripper.start()
+            try:
+                start = time.monotonic()
+                self.assertRaises(socket.timeout, client._recv_msg)
+                elapsed = time.monotonic() - start
+                self.assertLess(elapsed, 1.0)
+            finally:
+                dripper.join()
+        finally:
+            c.close()
+            s.close()
+
+    def test_recv_timeout_cleared_in_kernel(self):
+        # lsmd sets SO_RCVTIMEO on the client socket before fork() and the
+        # plug-in inherits it.  settimeout(None) only clears O_NONBLOCK, so
+        # unless the kernel timeout is cleared too an established session
+        # that idles past it fails with BlockingIOError instead of waiting.
+        c, s = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            c.setsockopt(socket.SOL_SOCKET, socket.SO_RCVTIMEO,
+                         struct.pack("@ll", 1, 0))
+            client = TransPort(c)
+            client.set_recv_timeout(1)
+            client.set_recv_timeout(None)
+
+            self.assertEqual(
+                struct.unpack(
+                    "@ll",
+                    c.getsockopt(socket.SOL_SOCKET, socket.SO_RCVTIMEO,
+                                 struct.calcsize("@ll"))), (0, 0))
+
+            # A reply arriving well after the original timeout must still be
+            # read normally.
+            def late_responder():
+                time.sleep(1.5)
+                TransPort(s).send_resp('late')
+
+            responder = threading.Thread(target=late_responder)
+            responder.start()
+            try:
+                reply, msg_id = client.read_resp()
+                self.assertEqual(reply, 'late')
+            finally:
+                responder.join()
+        finally:
+            c.close()
+            s.close()
 
     def test_oversized_message_rejected(self):
         # A header declaring a length >= MAX_MSG_LEN must be rejected before

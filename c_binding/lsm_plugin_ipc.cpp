@@ -22,6 +22,7 @@
 #include "lsm_convert.hpp"
 #include "lsm_datatypes.hpp"
 #include "lsm_ipc.hpp"
+#include "lsm_ipc_timeout.h"
 #include "uri_parser.hpp"
 #include <errno.h>
 #include <limits.h>
@@ -2442,6 +2443,10 @@ static int lsm_plugin_run(lsm_plugin_ptr p) {
     lsm_flag flags = 0;
 
     if (LSM_IS_PLUGIN(p)) {
+        /* Bound the pre-registration read so a client that connects but never
+         * completes plugin_register cannot block this worker indefinitely. */
+        p->tp->recv_timeout(LSM_PLUGIN_INITIAL_RECV_TIMEOUT_SECONDS);
+
         while (true) {
             try {
 
@@ -2460,6 +2465,12 @@ static int lsm_plugin_run(lsm_plugin_ptr p) {
 
                     if (LSM_ERR_OK == rc || LSM_ERR_JOB_STARTED == rc) {
                         p->tp->responseSend(resp);
+
+                        /* Client has registered; be lenient from here on so
+                         * slow operations are never interrupted. */
+                        if (method == "plugin_register") {
+                            p->tp->recv_timeout(0);
+                        }
                     } else {
                         error_send(p, rc);
                     }
@@ -2472,6 +2483,10 @@ static int lsm_plugin_run(lsm_plugin_ptr p) {
                     syslog(LOG_USER | LOG_NOTICE, "Invalid request");
                     break;
                 }
+            } catch (TimeoutException &to) {
+                syslog(LOG_USER | LOG_NOTICE,
+                       "Client failed to register in time, exiting!");
+                break;
             } catch (EOFException &eof) {
                 break;
             } catch (ValueException &ve) {

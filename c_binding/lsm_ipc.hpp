@@ -70,6 +70,13 @@ class LSM_DLL_LOCAL Transport {
     std::string msg_recv(int &error_code);
 
     /**
+     * Sets (or clears) a receive timeout on the underlying socket.
+     * @param seconds   Timeout in seconds; 0 clears the timeout (blocking).
+     * @return 0 on success, else errno.
+     */
+    int recv_timeout(int seconds);
+
+    /**
      * Creates a connected socket (AF_UNIX) to the specified path
      * @param path of the AF_UNIX file to be used for IPC
      * @param error_code    Error reason for the failure (errno)
@@ -84,7 +91,8 @@ class LSM_DLL_LOCAL Transport {
     void close();
 
   private:
-    int s; // Socket descriptor
+    int s;                    // Socket descriptor
+    int recv_timeout_seconds; // Set via recv_timeout(); 0 = blocking.
 };
 
 /**
@@ -105,6 +113,15 @@ template <class Type> static std::string to_string(Type v) {
 class LSM_DLL_LOCAL EOFException : public std::runtime_error {
   public:
     EOFException(std::string m);
+};
+
+/**
+ * Class that represents a receive timeout (SO_RCVTIMEO expired)
+ * @param m     Message
+ */
+class LSM_DLL_LOCAL TimeoutException : public std::runtime_error {
+  public:
+    TimeoutException(std::string m);
 };
 
 /**
@@ -405,6 +422,13 @@ class LSM_DLL_LOCAL Ipc {
      * @returns Value
      */
     Value readRequest(void);
+
+    /**
+     * Sets (or clears) a receive timeout on the underlying transport.
+     * @param seconds   Timeout in seconds; 0 clears the timeout (blocking).
+     * @return 0 on success, else errno.
+     */
+    int recv_timeout(int seconds);
 
     /**
      * Send a response to a request

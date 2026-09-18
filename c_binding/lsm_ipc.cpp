@@ -20,7 +20,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifdef HAVE_CONFIG_H
@@ -35,9 +37,10 @@ static std::string zero_pad_num(unsigned int num) {
     return ss.str();
 }
 
-Transport::Transport() : s(-1) {}
+Transport::Transport() : s(-1), recv_timeout_seconds(0) {}
 
-Transport::Transport(int socket_desc) : s(socket_desc) {}
+Transport::Transport(int socket_desc)
+    : s(socket_desc), recv_timeout_seconds(0) {}
 
 int Transport::msg_send(const std::string &msg, int &error_code) {
     int rc = -1;
@@ -72,7 +75,14 @@ int Transport::msg_send(const std::string &msg, int &error_code) {
     return rc;
 }
 
-static std::string string_read(int fd, ssize_t count, int &error_code) {
+// SO_RCVTIMEO (set via Transport::recv_timeout) bounds a single recv() call,
+// not the time spent reading a whole message. A peer that trickles data in,
+// always inside the timeout but slower than we would like, would otherwise
+// keep this loop making "forward progress" forever. The caller passes a
+// deadline covering the entire message so the configured timeout means what
+// it says; NULL leaves the read unbounded.
+static std::string string_read(int fd, ssize_t count, int &error_code,
+                               const struct timespec *deadline) {
     char buff[4096];
     ssize_t amount_read = 0;
     std::string rc = "";
@@ -90,6 +100,20 @@ static std::string string_read(int fd, ssize_t count, int &error_code) {
                 break;
             }
             rc += std::string(buff, rd);
+
+            // Only give up while the read is still short; a message whose
+            // last chunk lands on the deadline is complete and usable.
+            if (deadline != NULL && amount_read < count) {
+                struct timespec now;
+                clock_gettime(CLOCK_MONOTONIC, &now);
+                if (now.tv_sec > deadline->tv_sec ||
+                    (now.tv_sec == deadline->tv_sec &&
+                     now.tv_nsec > deadline->tv_nsec)) {
+                    error_code =
+                        EAGAIN; // Mapped to TimeoutException by callers.
+                    break;
+                }
+            }
         } else if (rd == 0) {
             throw EOFException("");
         } else {
@@ -105,12 +129,23 @@ std::string Transport::msg_recv(int &error_code) {
     std::string msg;
     error_code = 0;
     unsigned long int payload_len = 0;
-    std::string len = string_read(s, HDR_LEN, error_code); // Read the length
+
+    // One deadline spans the header and the payload; giving each read its own
+    // would hand a slow peer the configured timeout twice over.
+    struct timespec deadline;
+    const struct timespec *dl = NULL;
+    if (recv_timeout_seconds > 0) {
+        clock_gettime(CLOCK_MONOTONIC, &deadline);
+        deadline.tv_sec += recv_timeout_seconds;
+        dl = &deadline;
+    }
+
+    std::string len = string_read(s, HDR_LEN, error_code, dl); // Read length
     if (len.size() && error_code == 0) {
         payload_len = strtoul(len.c_str(), NULL, 10);
         if (payload_len < 0x80000000) { /* Should be big enough */
             ssize_t len = payload_len;
-            msg = string_read(s, len, error_code);
+            msg = string_read(s, len, error_code, dl);
         } else {
             error_code = EOVERFLOW;
         }
@@ -144,6 +179,18 @@ int Transport::socket_get(const std::string &path, int &error_code) {
     return rc;
 }
 
+int Transport::recv_timeout(int seconds) {
+    struct timeval tv;
+    tv.tv_sec = seconds;
+    tv.tv_usec = 0;
+
+    if (-1 == setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv))) {
+        return errno;
+    }
+    recv_timeout_seconds = seconds;
+    return 0;
+}
+
 Transport::~Transport() { close(); }
 
 void Transport::close() {
@@ -155,6 +202,8 @@ void Transport::close() {
 }
 
 EOFException::EOFException(std::string m) : std::runtime_error(m) {}
+
+TimeoutException::TimeoutException(std::string m) : std::runtime_error(m) {}
 
 ValueException::ValueException(std::string m) : std::runtime_error(m) {}
 
@@ -231,10 +280,15 @@ void Ipc::errorSend(int error_code, std::string msg, std::string debug,
     }
 }
 
+int Ipc::recv_timeout(int seconds) { return t.recv_timeout(seconds); }
+
 Value Ipc::readRequest(void) {
     int ec;
     std::string resp = t.msg_recv(ec);
     if (ec != 0) {
+        if (ec == EAGAIN || ec == EWOULDBLOCK) {
+            throw TimeoutException("Timed out reading message");
+        }
         std::string em =
             std::string("Error reading message: errno ") + ::to_string(ec);
         throw LsmException((int)LSM_ERR_TRANSPORT_COMMUNICATION, em);

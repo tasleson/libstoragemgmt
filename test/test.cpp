@@ -7,9 +7,11 @@
 #include "../c_binding/lsm_ipc.hpp"
 #include "libstoragemgmt/libstoragemgmt_error.h"
 
+#include <ctime>
 #include <iomanip>
 #include <sstream>
 #include <sys/socket.h>
+#include <thread>
 #include <unistd.h>
 
 /* check.h's "fail" macro clashes with std::basic_ios::fail(), so it must be
@@ -83,12 +85,146 @@ START_TEST(test_undersized_message_accepted) {
 }
 END_TEST
 
+START_TEST(test_recv_timeout_fires) {
+    int fds[2];
+    ck_assert_int_eq(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+
+    Ipc ipc(fds[0]);
+    ck_assert_int_eq(ipc.recv_timeout(1), 0);
+
+    /* Peer stays connected but never writes; readRequest() must time out
+     * rather than block forever (the DoS this guards against). */
+    bool caught_timeout = false;
+    time_t start = time(NULL);
+    try {
+        ipc.readRequest();
+    } catch (const TimeoutException &) {
+        caught_timeout = true;
+    }
+    time_t elapsed = time(NULL) - start;
+
+    close(fds[1]);
+
+    ck_assert_msg(caught_timeout,
+                  "Expected TimeoutException when the peer sends nothing");
+    ck_assert_msg(elapsed < 5,
+                  "recv_timeout did not fire promptly (elapsed %ld s)",
+                  (long)elapsed);
+}
+END_TEST
+
+START_TEST(test_recv_timeout_partial_header) {
+    int fds[2];
+    ck_assert_int_eq(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+
+    /* Write fewer bytes than a full header, then stall.  This exercises the
+     * MSG_WAITALL partial-read-then-EAGAIN path: it must map to a timeout,
+     * not a hang or a misframed message. */
+    const char partial[] = "00";
+    ssize_t written = write(fds[1], partial, sizeof(partial) - 1);
+    ck_assert_int_eq(written, (ssize_t)(sizeof(partial) - 1));
+    ck_assert_int_lt((int)(sizeof(partial) - 1), Transport::HDR_LEN);
+
+    Ipc ipc(fds[0]);
+    ck_assert_int_eq(ipc.recv_timeout(1), 0);
+
+    bool caught_timeout = false;
+    try {
+        ipc.readRequest();
+    } catch (const TimeoutException &) {
+        caught_timeout = true;
+    }
+
+    close(fds[1]);
+
+    ck_assert_msg(caught_timeout,
+                  "Expected TimeoutException on a stalled partial header");
+}
+END_TEST
+
+START_TEST(test_recv_timeout_cleared) {
+    int fds[2];
+    ck_assert_int_eq(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+
+    /* A complete, valid request is buffered by the socketpair, so a
+     * single-threaded write-then-read is sufficient. */
+    Ipc peer(fds[1]);
+    peer.requestSend("systems", Value());
+
+    Ipc ipc(fds[0]);
+    /* Arm then clear the timeout; a cleared timeout must not spuriously fire
+     * on a message that is actually available. */
+    ck_assert_int_eq(ipc.recv_timeout(1), 0);
+    ck_assert_int_eq(ipc.recv_timeout(0), 0);
+
+    bool caught = false;
+    std::string method;
+    try {
+        Value req = ipc.readRequest();
+        ck_assert_msg(req.isValidRequest(), "Expected a valid request");
+        method = req["method"].asString();
+    } catch (...) {
+        caught = true;
+    }
+
+    ck_assert_msg(!caught, "readRequest threw after the timeout was cleared");
+    ck_assert_str_eq(method.c_str(), "systems");
+}
+END_TEST
+
+START_TEST(test_recv_timeout_drip) {
+    int fds[2];
+    ck_assert_int_eq(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+
+    Ipc ipc(fds[0]);
+    ck_assert_int_eq(ipc.recv_timeout(1), 0);
+
+    /* Peer declares a 50 byte payload, then keeps sending a trickle of
+     * payload bytes one at a time, each arriving well inside the configured
+     * timeout, but never enough to complete the declared payload. The
+     * timeout must bound the whole read, not just each individual recv()
+     * call, otherwise this drip defeats it and readRequest() never returns. */
+    std::thread dripper([&]() {
+        const char hdr[] = "0000000050";
+        if (write(fds[1], hdr, sizeof(hdr) - 1) != (ssize_t)sizeof(hdr) - 1)
+            return;
+        for (int i = 0; i < 8; i++) {
+            if (write(fds[1], "x", 1) != 1)
+                break;
+            usleep(150000); /* 150ms, well under the 1s recv_timeout */
+        }
+    });
+
+    bool caught_timeout = false;
+    time_t start = time(NULL);
+    try {
+        ipc.readRequest();
+    } catch (const TimeoutException &) {
+        caught_timeout = true;
+    }
+    time_t elapsed = time(NULL) - start;
+
+    dripper.join();
+    close(fds[1]);
+
+    ck_assert_msg(caught_timeout,
+                  "Expected TimeoutException despite steady forward progress");
+    ck_assert_msg(elapsed < 3,
+                  "recv_timeout did not bound the overall read (elapsed %ld s)",
+                  (long)elapsed);
+}
+END_TEST
+
 static Suite *ipc_suite(void) {
     Suite *s = suite_create("ipc");
     TCase *tc = tcase_create("core");
 
     tcase_add_test(tc, test_oversized_message_rejected);
     tcase_add_test(tc, test_undersized_message_accepted);
+    tcase_add_test(tc, test_recv_timeout_fires);
+    tcase_add_test(tc, test_recv_timeout_partial_header);
+    tcase_add_test(tc, test_recv_timeout_cleared);
+    tcase_add_test(tc, test_recv_timeout_drip);
     suite_add_tcase(s, tc);
     return s;
 }

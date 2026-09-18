@@ -34,6 +34,8 @@
 #include <syslog.h>
 #include <unistd.h>
 
+#include "lsm_ipc_timeout.h"
+
 #define BASE_DIR                       "/var/run/lsm"
 #define SOCKET_DIR                     BASE_DIR "/ipc"
 #define PLUGIN_DIR                     "/usr/bin"
@@ -643,6 +645,19 @@ void exec_plugin(char *plugin, int client_fd, int require_root) {
     int err = 0;
 
     info("Exec'ing plug-in = %s\n", plugin);
+
+    /* Defense-in-depth: bound how long the plug-in can block reading the
+     * initial request from a client that connects but never sends a complete,
+     * registering message. Set before fork() so the child inherits it on the
+     * shared descriptor; the plug-in clears it once the client registers.
+     * A failure here is non-fatal. */
+    struct timeval rcvtmo = {.tv_sec = LSM_PLUGIN_INITIAL_RECV_TIMEOUT_SECONDS,
+                             .tv_usec = 0};
+    if (-1 == setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &rcvtmo,
+                         sizeof(rcvtmo))) {
+        err = errno;
+        info("Failed to set SO_RCVTIMEO on client socket: %s\n", strerror(err));
+    }
 
     pid_t process = fork();
     if (process < 0) {
