@@ -7,7 +7,9 @@
 #include "../c_binding/lsm_ipc.hpp"
 #include "libstoragemgmt/libstoragemgmt_error.h"
 
+#include <csignal>
 #include <cstdint>
+#include <cstring>
 #include <ctime>
 #include <iomanip>
 #include <sstream>
@@ -95,12 +97,12 @@ START_TEST(test_undersized_message_accepted) {
 }
 END_TEST
 
-START_TEST(test_recv_deadline_fires) {
+START_TEST(test_io_deadline_fires) {
     int fds[2];
     ck_assert_int_eq(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
 
     Ipc ipc(fds[0]);
-    ck_assert_int_eq(ipc.recv_deadline(1), 0);
+    ck_assert_int_eq(ipc.io_deadline(1), 0);
 
     /* Peer stays connected but never writes; readRequest() must time out
      * rather than block forever (the DoS this guards against). */
@@ -118,12 +120,12 @@ START_TEST(test_recv_deadline_fires) {
     ck_assert_msg(caught_timeout,
                   "Expected TimeoutException when the peer sends nothing");
     ck_assert_msg(elapsed < 5,
-                  "recv_deadline did not fire promptly (elapsed %ld s)",
+                  "io_deadline did not fire promptly (elapsed %ld s)",
                   (long)elapsed);
 }
 END_TEST
 
-START_TEST(test_recv_deadline_partial_header) {
+START_TEST(test_io_deadline_partial_header) {
     int fds[2];
     ck_assert_int_eq(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
 
@@ -136,7 +138,7 @@ START_TEST(test_recv_deadline_partial_header) {
     ck_assert_int_lt((int)(sizeof(partial) - 1), Transport::HDR_LEN);
 
     Ipc ipc(fds[0]);
-    ck_assert_int_eq(ipc.recv_deadline(1), 0);
+    ck_assert_int_eq(ipc.io_deadline(1), 0);
 
     bool caught_timeout = false;
     try {
@@ -152,7 +154,7 @@ START_TEST(test_recv_deadline_partial_header) {
 }
 END_TEST
 
-START_TEST(test_recv_deadline_cleared) {
+START_TEST(test_io_deadline_cleared) {
     int fds[2];
     ck_assert_int_eq(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
 
@@ -164,8 +166,8 @@ START_TEST(test_recv_deadline_cleared) {
     Ipc ipc(fds[0]);
     /* Arm then clear the deadline; a cleared deadline must not spuriously
      * fire on a message that is actually available. */
-    ck_assert_int_eq(ipc.recv_deadline(1), 0);
-    ck_assert_int_eq(ipc.recv_deadline(0), 0);
+    ck_assert_int_eq(ipc.io_deadline(1), 0);
+    ck_assert_int_eq(ipc.io_deadline(0), 0);
 
     bool caught = false;
     std::string method;
@@ -182,12 +184,12 @@ START_TEST(test_recv_deadline_cleared) {
 }
 END_TEST
 
-START_TEST(test_recv_deadline_drip) {
+START_TEST(test_io_deadline_drip) {
     int fds[2];
     ck_assert_int_eq(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
 
     Ipc ipc(fds[0]);
-    ck_assert_int_eq(ipc.recv_deadline(1), 0);
+    ck_assert_int_eq(ipc.io_deadline(1), 0);
 
     /* Peer declares a 50 byte payload, then keeps sending a trickle of
      * payload bytes one at a time, each arriving well inside the configured
@@ -225,7 +227,7 @@ START_TEST(test_recv_deadline_drip) {
 }
 END_TEST
 
-START_TEST(test_recv_deadline_spans_messages) {
+START_TEST(test_io_deadline_spans_messages) {
     int fds[2];
     ck_assert_int_eq(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
 
@@ -235,7 +237,7 @@ START_TEST(test_recv_deadline_spans_messages) {
      * more time, so the second read has to expire at the original deadline. */
     Ipc peer(fds[1]);
     Ipc ipc(fds[0]);
-    ck_assert_int_eq(ipc.recv_deadline(1), 0);
+    ck_assert_int_eq(ipc.io_deadline(1), 0);
 
     int64_t start = monotonic_ms();
 
@@ -265,12 +267,12 @@ START_TEST(test_recv_deadline_spans_messages) {
 }
 END_TEST
 
-START_TEST(test_recv_deadline_spans_header_and_payload) {
+START_TEST(test_io_deadline_spans_header_and_payload) {
     int fds[2];
     ck_assert_int_eq(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
 
     Ipc ipc(fds[0]);
-    ck_assert_int_eq(ipc.recv_deadline(2), 0);
+    ck_assert_int_eq(ipc.io_deadline(2), 0);
 
     /* The header lands just inside the deadline and the peer then stalls.
      * The payload read must inherit what is left of the deadline rather than
@@ -303,18 +305,124 @@ START_TEST(test_recv_deadline_spans_header_and_payload) {
 }
 END_TEST
 
+/*
+ * A send that is not bounded would hang this test forever (the suite runs
+ * with CK_FORK=no, so check's own per-test timeout cannot save us).  The
+ * watchdog shuts the socket down from a SIGALRM handler instead, which turns
+ * a blocked send() into an EPIPE the assertions below can report.
+ */
+static volatile sig_atomic_t watchdog_fd = -1;
+
+static void watchdog_handler(int sig) {
+    (void)sig;
+    if (watchdog_fd != -1) {
+        shutdown(watchdog_fd, SHUT_RDWR);
+    }
+}
+
+/* Arms the watchdog on 'fd'; 0 seconds cancels it. */
+static void watchdog(unsigned int seconds, int fd) {
+    struct sigaction sa;
+
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = seconds ? watchdog_handler : SIG_DFL;
+    sa.sa_flags = 0;
+    sigaction(SIGALRM, &sa, NULL);
+    watchdog_fd = seconds ? fd : -1;
+    alarm(seconds);
+}
+
+START_TEST(test_io_deadline_bounds_send) {
+    int fds[2];
+    ck_assert_int_eq(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+
+    Ipc ipc(fds[0]);
+    ck_assert_int_eq(ipc.io_deadline(1), 0);
+
+    /* The peer stays connected but never reads, so the socket buffer fills
+     * and send() blocks.  An un-registered client that chatters requests and
+     * ignores the replies pins a worker exactly this way, so the deadline has
+     * to cover writes as well as reads. */
+    bool caught_timeout = false;
+    bool caught_other = false;
+    watchdog(5, fds[0]);
+    int64_t start = monotonic_ms();
+    try {
+        for (int i = 0; i < 64; i++) {
+            ipc.responseSend(Value(std::string(64 * 1024, 'x')));
+        }
+    } catch (const TimeoutException &) {
+        caught_timeout = true;
+    } catch (...) {
+        caught_other = true;
+    }
+    int64_t elapsed = monotonic_ms() - start;
+    watchdog(0, -1);
+
+    close(fds[1]);
+
+    ck_assert_msg(!caught_other,
+                  "Expected TimeoutException; got another exception, i.e. the "
+                  "watchdog had to tear the socket down");
+    ck_assert_msg(caught_timeout,
+                  "send to a peer that never reads was not bounded");
+    /* One send() can overshoot the deadline, so allow for that here. */
+    ck_assert_msg(elapsed < 4000,
+                  "deadline did not bound the send (elapsed %lld ms)",
+                  (long long)elapsed);
+}
+END_TEST
+
+START_TEST(test_io_deadline_cleared_both_directions) {
+    int fds[2];
+    ck_assert_int_eq(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+
+    /* lsmd sets both timeouts on the descriptor before fork(), and we set
+     * SO_SNDTIMEO ourselves while the deadline is armed.  Clearing the
+     * deadline has to zero both, or a slow post-registration operation gets
+     * interrupted - the very regression the deadline is meant to avoid. */
+    struct timeval one_sec = {1, 0};
+    ck_assert_int_eq(
+        setsockopt(fds[0], SOL_SOCKET, SO_RCVTIMEO, &one_sec, sizeof(one_sec)),
+        0);
+    ck_assert_int_eq(
+        setsockopt(fds[0], SOL_SOCKET, SO_SNDTIMEO, &one_sec, sizeof(one_sec)),
+        0);
+
+    Ipc ipc(fds[0]);
+    ck_assert_int_eq(ipc.io_deadline(1), 0);
+    ck_assert_int_eq(ipc.io_deadline(0), 0);
+
+    const int opts[] = {SO_RCVTIMEO, SO_SNDTIMEO};
+    for (unsigned i = 0; i < sizeof(opts) / sizeof(opts[0]); i++) {
+        struct timeval tv;
+        socklen_t len = sizeof(tv);
+
+        ck_assert_int_eq(getsockopt(fds[0], SOL_SOCKET, opts[i], &tv, &len), 0);
+        ck_assert_msg(tv.tv_sec == 0 && tv.tv_usec == 0,
+                      "socket timeout %d still set (%ld.%06ld)", opts[i],
+                      (long)tv.tv_sec, (long)tv.tv_usec);
+    }
+
+    close(fds[0]);
+    close(fds[1]);
+}
+END_TEST
+
 static Suite *ipc_suite(void) {
     Suite *s = suite_create("ipc");
     TCase *tc = tcase_create("core");
 
     tcase_add_test(tc, test_oversized_message_rejected);
     tcase_add_test(tc, test_undersized_message_accepted);
-    tcase_add_test(tc, test_recv_deadline_fires);
-    tcase_add_test(tc, test_recv_deadline_partial_header);
-    tcase_add_test(tc, test_recv_deadline_cleared);
-    tcase_add_test(tc, test_recv_deadline_drip);
-    tcase_add_test(tc, test_recv_deadline_spans_messages);
-    tcase_add_test(tc, test_recv_deadline_spans_header_and_payload);
+    tcase_add_test(tc, test_io_deadline_fires);
+    tcase_add_test(tc, test_io_deadline_partial_header);
+    tcase_add_test(tc, test_io_deadline_cleared);
+    tcase_add_test(tc, test_io_deadline_drip);
+    tcase_add_test(tc, test_io_deadline_spans_messages);
+    tcase_add_test(tc, test_io_deadline_spans_header_and_payload);
+    tcase_add_test(tc, test_io_deadline_bounds_send);
+    tcase_add_test(tc, test_io_deadline_cleared_both_directions);
     suite_add_tcase(s, tc);
     return s;
 }

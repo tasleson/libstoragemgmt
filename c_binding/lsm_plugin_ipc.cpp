@@ -2446,10 +2446,11 @@ static int lsm_plugin_run(lsm_plugin_ptr p) {
         /* One absolute deadline for the whole registration handshake, armed
          * before the first read: an un-registered client cannot stretch it by
          * keeping the conversation alive with requests we reject, the way a
-         * per-message timeout let it.  Note this bounds reads only - msg_send
-         * still blocks indefinitely on a peer that stops reading our replies.
+         * per-message timeout let it.  It bounds our replies too, so a client
+         * that chatters but never reads them cannot pin us inside send()
+         * either; both expiries arrive here as TimeoutException.
          */
-        p->tp->recv_deadline(LSM_PLUGIN_INITIAL_RECV_TIMEOUT_SECONDS);
+        p->tp->io_deadline(LSM_PLUGIN_INITIAL_RECV_TIMEOUT_SECONDS);
 
         while (true) {
             try {
@@ -2473,7 +2474,7 @@ static int lsm_plugin_run(lsm_plugin_ptr p) {
                         /* Client has registered; drop the deadline so slow
                          * operations are never interrupted. */
                         if (method == "plugin_register") {
-                            p->tp->recv_deadline(0);
+                            p->tp->io_deadline(0);
                         }
                     } else {
                         error_send(p, rc);

@@ -646,17 +646,23 @@ void exec_plugin(char *plugin, int client_fd, int require_root) {
 
     info("Exec'ing plug-in = %s\n", plugin);
 
-    /* Defense-in-depth: bound how long the plug-in can block reading the
-     * initial request from a client that connects but never sends a complete,
-     * registering message. Set before fork() so the child inherits it on the
-     * shared descriptor; the plug-in clears it once the client registers.
-     * A failure here is non-fatal. */
-    struct timeval rcvtmo = {.tv_sec = LSM_PLUGIN_INITIAL_RECV_TIMEOUT_SECONDS,
-                             .tv_usec = 0};
-    if (-1 == setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &rcvtmo,
-                         sizeof(rcvtmo))) {
+    /* Defense-in-depth: bound how long the plug-in can block on a client that
+     * connects but never sends a complete, registering message - or never
+     * reads the replies we send it. Set before fork() so the child inherits
+     * them on the shared descriptor; the plug-in clears both once the client
+     * registers. A failure here is non-fatal. */
+    struct timeval tmo = {.tv_sec = LSM_PLUGIN_INITIAL_RECV_TIMEOUT_SECONDS,
+                          .tv_usec = 0};
+    if (-1 ==
+        setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tmo, sizeof(tmo))) {
         err = errno;
         info("Failed to set SO_RCVTIMEO on client socket: %s\n", strerror(err));
+    }
+
+    if (-1 ==
+        setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &tmo, sizeof(tmo))) {
+        err = errno;
+        info("Failed to set SO_SNDTIMEO on client socket: %s\n", strerror(err));
     }
 
     pid_t process = fork();

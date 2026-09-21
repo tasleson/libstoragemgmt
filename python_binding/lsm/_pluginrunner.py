@@ -87,9 +87,10 @@ class PluginRunner(object):
         # One absolute deadline for the whole registration handshake, armed
         # before the first read: an un-registered client cannot stretch it by
         # keeping the conversation alive with requests we reject, the way a
-        # per-message timeout let it.  Note this bounds reads only - a peer
-        # that stops reading our replies is a separate problem.
-        self.tp.set_recv_deadline(REGISTRATION_TIMEOUT)
+        # per-message timeout let it.  It bounds our replies too, so a peer
+        # that chatters but never reads them cannot pin us inside sendall()
+        # either; both expiries arrive as socket.timeout.
+        self.tp.set_io_deadline(REGISTRATION_TIMEOUT)
 
         try:
             while True:
@@ -123,7 +124,7 @@ class PluginRunner(object):
                         need_shutdown = True
                         # Client has registered; drop the deadline so slow
                         # operations are never interrupted.
-                        self.tp.set_recv_deadline(None)
+                        self.tp.set_io_deadline(None)
 
                     if method == 'plugin_unregister':
                         # This is a graceful plugin_unregister

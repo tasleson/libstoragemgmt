@@ -37,50 +37,17 @@ static std::string zero_pad_num(unsigned int num) {
     return ss.str();
 }
 
-Transport::Transport() : s(-1), recv_deadline_active(false) {
-    memset(&recv_deadline_ts, 0, sizeof(recv_deadline_ts));
+Transport::Transport() : s(-1), io_deadline_active(false) {
+    memset(&io_deadline_ts, 0, sizeof(io_deadline_ts));
 }
 
 Transport::Transport(int socket_desc)
-    : s(socket_desc), recv_deadline_active(false) {
-    memset(&recv_deadline_ts, 0, sizeof(recv_deadline_ts));
-}
-
-int Transport::msg_send(const std::string &msg, int &error_code) {
-    int rc = -1;
-    error_code = 0;
-
-    if (msg.size() > 0) {
-        ssize_t written = 0;
-        // fprintf(stderr, ">>> %s\n", msg.c_str());
-        std::string data = zero_pad_num(msg.size()) + msg;
-        ssize_t msg_size = data.size();
-
-        while (written < msg_size) {
-            ssize_t wrote =
-                send(s, data.c_str() + written, (msg_size - written),
-                     MSG_NOSIGNAL); // Prevent SIGPIPE on write
-            if (wrote != -1) {
-                ssize_t t = written;
-                if (__builtin_add_overflow(t, wrote, &written)) {
-                    error_code = EOVERFLOW;
-                    break;
-                }
-            } else {
-                error_code = errno;
-                break;
-            }
-        }
-
-        if ((written == msg_size) && error_code == 0) {
-            rc = 0;
-        }
-    }
-    return rc;
+    : s(socket_desc), io_deadline_active(false) {
+    memset(&io_deadline_ts, 0, sizeof(io_deadline_ts));
 }
 
 // How much of 'deadline' is left, as a struct timeval suitable for
-// SO_RCVTIMEO. Returns false once the deadline has passed.
+// SO_RCVTIMEO/SO_SNDTIMEO. Returns false once the deadline has passed.
 static bool time_remaining(const struct timespec &deadline,
                            struct timeval &tv) {
     struct timespec now;
@@ -103,11 +70,79 @@ static bool time_remaining(const struct timespec &deadline,
     tv.tv_sec = secs;
     tv.tv_usec = nsecs / 1000;
     if (tv.tv_sec == 0 && tv.tv_usec == 0) {
-        // A zeroed SO_RCVTIMEO means "block forever", so round the last
-        // sliver of the deadline up rather than disabling the timeout.
+        // A zeroed timeout means "block forever", so round the last sliver
+        // of the deadline up rather than disabling the timeout.
         tv.tv_usec = 1;
     }
     return true;
+}
+
+// A blocking send() on a peer that has stopped reading our replies is just
+// as effective a way to pin a worker as a stalled recv(), so the caller's
+// deadline has to cover this loop too. Each send() is given whatever is left
+// of it, mirroring string_read(); NULL leaves the write unbounded and
+// SO_SNDTIMEO untouched.
+//
+// Unlike SO_RCVTIMEO, this bounds the loop rather than the syscall: a single
+// AF_UNIX send() waits for buffer space repeatedly and the kernel re-arms
+// SO_SNDTIMEO for each wait, so a peer draining a trickle can keep one call
+// inside the kernel for several times the timeout. The deadline is therefore
+// enforced between messages, and the overshoot is one send() call. That is
+// enough for what this guards - pre-registration replies are small error
+// frames that either fit in the socket buffer or fail fast - but it is not
+// the hard per-write bound the recv side gets.
+//
+// A send() that expires returns -1/EAGAIN possibly having written part of
+// the message, which leaves the connection unusable, so giving up here is
+// the only sane thing to do; callers map EAGAIN to TimeoutException.
+int Transport::msg_send(const std::string &msg, int &error_code) {
+    int rc = -1;
+    error_code = 0;
+
+    if (msg.size() > 0) {
+        ssize_t written = 0;
+        // fprintf(stderr, ">>> %s\n", msg.c_str());
+        std::string data = zero_pad_num(msg.size()) + msg;
+        ssize_t msg_size = data.size();
+        const struct timespec *deadline =
+            io_deadline_active ? &io_deadline_ts : NULL;
+
+        while (written < msg_size) {
+            if (deadline != NULL) {
+                struct timeval tv;
+
+                if (!time_remaining(*deadline, tv)) {
+                    error_code = EAGAIN;
+                    break;
+                }
+
+                if (-1 ==
+                    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv))) {
+                    error_code = errno;
+                    break;
+                }
+            }
+
+            ssize_t wrote =
+                send(s, data.c_str() + written, (msg_size - written),
+                     MSG_NOSIGNAL); // Prevent SIGPIPE on write
+            if (wrote != -1) {
+                ssize_t t = written;
+                if (__builtin_add_overflow(t, wrote, &written)) {
+                    error_code = EOVERFLOW;
+                    break;
+                }
+            } else {
+                error_code = errno;
+                break;
+            }
+        }
+
+        if ((written == msg_size) && error_code == 0) {
+            rc = 0;
+        }
+    }
+    return rc;
 }
 
 // SO_RCVTIMEO bounds a single recv() call, not the time spent reading a whole
@@ -174,7 +209,7 @@ std::string Transport::msg_recv(int &error_code) {
     // One absolute deadline spans the header, the payload and every message
     // that follows; re-arming it here would hand a slow or chatty peer the
     // configured timeout over and over again.
-    const struct timespec *dl = recv_deadline_active ? &recv_deadline_ts : NULL;
+    const struct timespec *dl = io_deadline_active ? &io_deadline_ts : NULL;
 
     std::string len = string_read(s, HDR_LEN, error_code, dl); // Read length
     if (len.size() && error_code == 0) {
@@ -215,29 +250,34 @@ int Transport::socket_get(const std::string &path, int &error_code) {
     return rc;
 }
 
-int Transport::recv_deadline(int seconds) {
+int Transport::io_deadline(int seconds) {
     if (seconds > 0) {
-        if (-1 == clock_gettime(CLOCK_MONOTONIC, &recv_deadline_ts)) {
+        if (-1 == clock_gettime(CLOCK_MONOTONIC, &io_deadline_ts)) {
             return errno;
         }
-        recv_deadline_ts.tv_sec += seconds;
-        recv_deadline_active = true;
-        // SO_RCVTIMEO is left alone here; each read sets it to whatever is
-        // left of the deadline.
+        io_deadline_ts.tv_sec += seconds;
+        io_deadline_active = true;
+        // SO_RCVTIMEO/SO_SNDTIMEO are left alone here; each read and write
+        // sets them to whatever is left of the deadline.
         return 0;
     }
 
-    recv_deadline_active = false;
+    io_deadline_active = false;
 
-    // lsmd sets SO_RCVTIMEO on the descriptor before fork() and the plug-in
-    // inherits it, so clearing our deadline has to clear the kernel's timeout
-    // too or an established, registered session that sits idle gets torn
-    // down.
+    // Both directions have to be cleared. lsmd sets SO_RCVTIMEO on the
+    // descriptor before fork() and the plug-in inherits it, and we set
+    // SO_SNDTIMEO ourselves while the deadline was armed; leaving either
+    // behind tears down an established, registered session the moment it
+    // idles or sends something large slowly.
     struct timeval tv;
     tv.tv_sec = 0;
     tv.tv_usec = 0;
 
     if (-1 == setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv))) {
+        return errno;
+    }
+
+    if (-1 == setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv))) {
         return errno;
     }
     return 0;
@@ -288,6 +328,19 @@ Ipc::Ipc(std::string socket_path) {
 
 Ipc::~Ipc() { t.close(); }
 
+// A send that hits the deadline has to end a plug-in's session the same way
+// a read that hits it does, so it surfaces as TimeoutException rather than
+// as a generic transport failure.
+static void throw_send_failure(int error_code, const std::string &what) {
+    if (error_code == EAGAIN || error_code == EWOULDBLOCK) {
+        throw TimeoutException(std::string("Timed out ") + what);
+    }
+
+    std::string em =
+        std::string("Error ") + what + ": errno " + ::to_string(error_code);
+    throw LsmException((int)LSM_ERR_TRANSPORT_COMMUNICATION, em);
+}
+
 void Ipc::requestSend(const std::string request, const Value &params,
                       int32_t id) {
     int rc = 0;
@@ -302,9 +355,7 @@ void Ipc::requestSend(const std::string request, const Value &params,
     rc = t.msg_send(Payload::serialize(req), ec);
 
     if (rc != 0) {
-        std::string em =
-            std::string("Error sending message: errno ") + ::to_string(ec);
-        throw LsmException((int)LSM_ERR_TRANSPORT_COMMUNICATION, em);
+        throw_send_failure(ec, "sending message");
     }
 }
 
@@ -326,13 +377,11 @@ void Ipc::errorSend(int error_code, std::string msg, std::string debug,
     rc = t.msg_send(Payload::serialize(e), ec);
 
     if (rc != 0) {
-        std::string em = std::string("Error sending error message: errno ") +
-                         ::to_string(ec);
-        throw LsmException((int)LSM_ERR_TRANSPORT_COMMUNICATION, em);
+        throw_send_failure(ec, "sending error message");
     }
 }
 
-int Ipc::recv_deadline(int seconds) { return t.recv_deadline(seconds); }
+int Ipc::io_deadline(int seconds) { return t.io_deadline(seconds); }
 
 Value Ipc::readRequest(void) {
     int ec;
@@ -360,9 +409,7 @@ void Ipc::responseSend(const Value &response, uint32_t id) {
     rc = t.msg_send(Payload::serialize(resp), ec);
 
     if (rc != 0) {
-        std::string em =
-            std::string("Error sending response: errno ") + ::to_string(ec);
-        throw LsmException((int)LSM_ERR_TRANSPORT_COMMUNICATION, em);
+        throw_send_failure(ec, "sending response");
     }
 }
 

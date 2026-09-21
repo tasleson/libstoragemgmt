@@ -54,7 +54,8 @@ class LSM_DLL_LOCAL Transport {
     ~Transport();
 
     /**
-     * Sends a message over the transport.
+     * Sends a message over the transport.  Bounded by any deadline armed
+     * with io_deadline(); error_code is EAGAIN if one expired mid-send.
      * @param[in]   msg         The message to be sent.
      * @param[out]  error_code  Errno (only valid if we return -1)
      * @return 0 on success, else -1
@@ -71,14 +72,17 @@ class LSM_DLL_LOCAL Transport {
     std::string msg_recv(int &error_code);
 
     /**
-     * Arms (or clears) an absolute receive deadline.
+     * Arms (or clears) an absolute I/O deadline.
      * The deadline expires 'seconds' from now and covers every subsequent
-     * read, not just the next one: reading a message does not buy any more
-     * time.  Each recv() is given whatever is left of it.
+     * read and write, not just the next one: sending or receiving a message
+     * does not buy any more time.  Each recv()/send() is given whatever is
+     * left of it, so neither a peer that stops writing nor one that stops
+     * reading our replies can block us past it.  Note a write is bounded
+     * between messages rather than per syscall; see msg_send().
      * @param seconds   Seconds from now; 0 clears the deadline (blocking).
      * @return 0 on success, else errno.
      */
-    int recv_deadline(int seconds);
+    int io_deadline(int seconds);
 
     /**
      * Creates a connected socket (AF_UNIX) to the specified path
@@ -96,9 +100,10 @@ class LSM_DLL_LOCAL Transport {
 
   private:
     int s; // Socket descriptor
-    // Absolute CLOCK_MONOTONIC deadline armed via recv_deadline().
-    struct timespec recv_deadline_ts;
-    bool recv_deadline_active;
+    // Absolute CLOCK_MONOTONIC deadline armed via io_deadline(), applied
+    // to both directions.
+    struct timespec io_deadline_ts;
+    bool io_deadline_active;
 };
 
 /**
@@ -122,7 +127,7 @@ class LSM_DLL_LOCAL EOFException : public std::runtime_error {
 };
 
 /**
- * Class that represents a receive timeout (SO_RCVTIMEO expired)
+ * Class that represents an I/O timeout (SO_RCVTIMEO/SO_SNDTIMEO expired)
  * @param m     Message
  */
 class LSM_DLL_LOCAL TimeoutException : public std::runtime_error {
@@ -430,12 +435,12 @@ class LSM_DLL_LOCAL Ipc {
     Value readRequest(void);
 
     /**
-     * Arms (or clears) an absolute receive deadline on the underlying
-     * transport.  See Transport::recv_deadline().
+     * Arms (or clears) an absolute I/O deadline on the underlying
+     * transport.  See Transport::io_deadline().
      * @param seconds   Seconds from now; 0 clears the deadline (blocking).
      * @return 0 on success, else errno.
      */
-    int recv_deadline(int seconds);
+    int io_deadline(int seconds);
 
     /**
      * Send a response to a request

@@ -69,6 +69,11 @@ class FakePlugin(object):
     def systems(self, **kwargs):
         return []
 
+    def bulk(self, **kwargs):
+        # A reply large enough that a handful of them overflow the socket
+        # buffer of a client that never reads.
+        return 'x' * 65536
+
 
 class TestPluginRunner(unittest.TestCase):
     def setUp(self):
@@ -142,6 +147,44 @@ class TestPluginRunner(unittest.TestCase):
             self.assertLess(
                 elapsed, deadline * 4,
                 "registration deadline was renewed by each request "
+                "(elapsed %.2fs, deadline %.2fs)" % (elapsed, deadline))
+        finally:
+            plugin_sock.close()
+            client_sock.close()
+
+    def test_pre_auth_deaf_client_does_not_pin_runner(self):
+        """A client that keeps sending requests but never reads the replies
+        fills the socket buffer; the runner has to give up rather than wedge
+        inside sendall().  Note this does not discriminate the explicit send
+        deadline on its own: _read_all() leaves a socket timeout behind that
+        already bounded this path by accident.  It guards the end-to-end
+        behavior the explicit check now makes deliberate."""
+        deadline = _pluginrunner.REGISTRATION_TIMEOUT
+        plugin_sock, client_sock = socket.socketpair(socket.AF_UNIX,
+                                                     socket.SOCK_STREAM)
+        # Bound our own sends too, so a wedged worker costs us seconds rather
+        # than hanging the suite.
+        client_sock.settimeout(5)
+        try:
+            thread = self._start_runner(plugin_sock)
+            client = TransPort(client_sock)
+
+            start = time.monotonic()
+            try:
+                for _ in range(8):
+                    client.send_req('bulk', {'flags': 0})
+            except (socket.timeout, OSError):
+                pass
+
+            # Not a single reply is ever read.
+            thread.join(timeout=5)
+            elapsed = time.monotonic() - start
+            self.assertFalse(
+                thread.is_alive(),
+                "plug-in blocked sending replies the client never read")
+            self.assertLess(
+                elapsed, deadline * 3,
+                "plug-in took far longer than the deadline to give up "
                 "(elapsed %.2fs, deadline %.2fs)" % (elapsed, deadline))
         finally:
             plugin_sock.close()

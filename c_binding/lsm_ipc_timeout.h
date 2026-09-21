@@ -11,9 +11,10 @@
 
 /* How long (seconds) a client has to complete plugin_register before the
  * plug-in gives up on it. The plug-in runners turn this into a single
- * absolute deadline covering every read until registration, so a peer cannot
- * renew it by sending requests. The daemon uses the same value for the
- * defense-in-depth SO_RCVTIMEO it sets before fork(). Kept consistent with
+ * absolute deadline covering every read and write until registration, so a
+ * peer cannot renew it by sending requests, nor stall us by refusing to read
+ * our replies. The daemon uses the same value for the defense-in-depth
+ * SO_RCVTIMEO/SO_SNDTIMEO it sets before fork(). Kept consistent with
  * REGISTRATION_TIMEOUT in python_binding/lsm/_pluginrunner.py. Cleared once
  * the client registers, so slow post-registration operations are never
  * interrupted. */
