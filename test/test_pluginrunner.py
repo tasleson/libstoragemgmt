@@ -72,12 +72,12 @@ class FakePlugin(object):
 
 class TestPluginRunner(unittest.TestCase):
     def setUp(self):
-        # Small timeout so the pre-auth case fires quickly.
-        self._saved_timeout = _pluginrunner.INITIAL_RECV_TIMEOUT
-        _pluginrunner.INITIAL_RECV_TIMEOUT = 0.3
+        # Small deadline so the pre-auth case fires quickly.
+        self._saved_timeout = _pluginrunner.REGISTRATION_TIMEOUT
+        _pluginrunner.REGISTRATION_TIMEOUT = 0.3
 
     def tearDown(self):
-        _pluginrunner.INITIAL_RECV_TIMEOUT = self._saved_timeout
+        _pluginrunner.REGISTRATION_TIMEOUT = self._saved_timeout
 
     @staticmethod
     def _start_runner(plugin_sock):
@@ -90,7 +90,8 @@ class TestPluginRunner(unittest.TestCase):
 
     def test_pre_auth_timeout_exits(self):
         """A client that connects but never sends plugin_register must not
-        wedge the worker; run() has to exit once the pre-auth timeout fires."""
+        wedge the worker; run() has to exit once the pre-auth deadline
+        fires."""
         plugin_sock, client_sock = socket.socketpair(socket.AF_UNIX,
                                                       socket.SOCK_STREAM)
         try:
@@ -115,7 +116,7 @@ class TestPluginRunner(unittest.TestCase):
         # itself.  Reproduce that here: clearing the Python-level timeout
         # alone leaves this behind, and the idle gap below then fails the
         # read with BlockingIOError instead of simply waiting.
-        timeout = _pluginrunner.INITIAL_RECV_TIMEOUT
+        timeout = _pluginrunner.REGISTRATION_TIMEOUT
         plugin_sock.setsockopt(
             socket.SOL_SOCKET, socket.SO_RCVTIMEO,
             struct.pack("@ll", int(timeout), int(timeout % 1 * 1000000)))
@@ -131,7 +132,7 @@ class TestPluginRunner(unittest.TestCase):
                                            'flags': 0})
 
             # Idle longer than the (now-cleared) pre-auth timeout.
-            time.sleep(_pluginrunner.INITIAL_RECV_TIMEOUT * 2)
+            time.sleep(_pluginrunner.REGISTRATION_TIMEOUT * 2)
 
             result = client.rpc('systems', {'search_key': None,
                                             'search_value': None,

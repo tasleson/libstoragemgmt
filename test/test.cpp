@@ -85,12 +85,12 @@ START_TEST(test_undersized_message_accepted) {
 }
 END_TEST
 
-START_TEST(test_recv_timeout_fires) {
+START_TEST(test_recv_deadline_fires) {
     int fds[2];
     ck_assert_int_eq(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
 
     Ipc ipc(fds[0]);
-    ck_assert_int_eq(ipc.recv_timeout(1), 0);
+    ck_assert_int_eq(ipc.recv_deadline(1), 0);
 
     /* Peer stays connected but never writes; readRequest() must time out
      * rather than block forever (the DoS this guards against). */
@@ -108,12 +108,12 @@ START_TEST(test_recv_timeout_fires) {
     ck_assert_msg(caught_timeout,
                   "Expected TimeoutException when the peer sends nothing");
     ck_assert_msg(elapsed < 5,
-                  "recv_timeout did not fire promptly (elapsed %ld s)",
+                  "recv_deadline did not fire promptly (elapsed %ld s)",
                   (long)elapsed);
 }
 END_TEST
 
-START_TEST(test_recv_timeout_partial_header) {
+START_TEST(test_recv_deadline_partial_header) {
     int fds[2];
     ck_assert_int_eq(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
 
@@ -126,7 +126,7 @@ START_TEST(test_recv_timeout_partial_header) {
     ck_assert_int_lt((int)(sizeof(partial) - 1), Transport::HDR_LEN);
 
     Ipc ipc(fds[0]);
-    ck_assert_int_eq(ipc.recv_timeout(1), 0);
+    ck_assert_int_eq(ipc.recv_deadline(1), 0);
 
     bool caught_timeout = false;
     try {
@@ -142,7 +142,7 @@ START_TEST(test_recv_timeout_partial_header) {
 }
 END_TEST
 
-START_TEST(test_recv_timeout_cleared) {
+START_TEST(test_recv_deadline_cleared) {
     int fds[2];
     ck_assert_int_eq(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
 
@@ -152,10 +152,10 @@ START_TEST(test_recv_timeout_cleared) {
     peer.requestSend("systems", Value());
 
     Ipc ipc(fds[0]);
-    /* Arm then clear the timeout; a cleared timeout must not spuriously fire
-     * on a message that is actually available. */
-    ck_assert_int_eq(ipc.recv_timeout(1), 0);
-    ck_assert_int_eq(ipc.recv_timeout(0), 0);
+    /* Arm then clear the deadline; a cleared deadline must not spuriously
+     * fire on a message that is actually available. */
+    ck_assert_int_eq(ipc.recv_deadline(1), 0);
+    ck_assert_int_eq(ipc.recv_deadline(0), 0);
 
     bool caught = false;
     std::string method;
@@ -167,17 +167,17 @@ START_TEST(test_recv_timeout_cleared) {
         caught = true;
     }
 
-    ck_assert_msg(!caught, "readRequest threw after the timeout was cleared");
+    ck_assert_msg(!caught, "readRequest threw after the deadline was cleared");
     ck_assert_str_eq(method.c_str(), "systems");
 }
 END_TEST
 
-START_TEST(test_recv_timeout_drip) {
+START_TEST(test_recv_deadline_drip) {
     int fds[2];
     ck_assert_int_eq(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
 
     Ipc ipc(fds[0]);
-    ck_assert_int_eq(ipc.recv_timeout(1), 0);
+    ck_assert_int_eq(ipc.recv_deadline(1), 0);
 
     /* Peer declares a 50 byte payload, then keeps sending a trickle of
      * payload bytes one at a time, each arriving well inside the configured
@@ -191,7 +191,7 @@ START_TEST(test_recv_timeout_drip) {
         for (int i = 0; i < 8; i++) {
             if (write(fds[1], "x", 1) != 1)
                 break;
-            usleep(150000); /* 150ms, well under the 1s recv_timeout */
+            usleep(150000); /* 150ms, well under the 1s deadline */
         }
     });
 
@@ -210,7 +210,7 @@ START_TEST(test_recv_timeout_drip) {
     ck_assert_msg(caught_timeout,
                   "Expected TimeoutException despite steady forward progress");
     ck_assert_msg(elapsed < 3,
-                  "recv_timeout did not bound the overall read (elapsed %ld s)",
+                  "deadline did not bound the overall read (elapsed %ld s)",
                   (long)elapsed);
 }
 END_TEST
@@ -221,10 +221,10 @@ static Suite *ipc_suite(void) {
 
     tcase_add_test(tc, test_oversized_message_rejected);
     tcase_add_test(tc, test_undersized_message_accepted);
-    tcase_add_test(tc, test_recv_timeout_fires);
-    tcase_add_test(tc, test_recv_timeout_partial_header);
-    tcase_add_test(tc, test_recv_timeout_cleared);
-    tcase_add_test(tc, test_recv_timeout_drip);
+    tcase_add_test(tc, test_recv_deadline_fires);
+    tcase_add_test(tc, test_recv_deadline_partial_header);
+    tcase_add_test(tc, test_recv_deadline_cleared);
+    tcase_add_test(tc, test_recv_deadline_drip);
     suite_add_tcase(s, tc);
     return s;
 }

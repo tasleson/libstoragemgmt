@@ -37,10 +37,14 @@ static std::string zero_pad_num(unsigned int num) {
     return ss.str();
 }
 
-Transport::Transport() : s(-1), recv_timeout_seconds(0) {}
+Transport::Transport() : s(-1), recv_deadline_active(false) {
+    memset(&recv_deadline_ts, 0, sizeof(recv_deadline_ts));
+}
 
 Transport::Transport(int socket_desc)
-    : s(socket_desc), recv_timeout_seconds(0) {}
+    : s(socket_desc), recv_deadline_active(false) {
+    memset(&recv_deadline_ts, 0, sizeof(recv_deadline_ts));
+}
 
 int Transport::msg_send(const std::string &msg, int &error_code) {
     int rc = -1;
@@ -75,12 +79,48 @@ int Transport::msg_send(const std::string &msg, int &error_code) {
     return rc;
 }
 
-// SO_RCVTIMEO (set via Transport::recv_timeout) bounds a single recv() call,
-// not the time spent reading a whole message. A peer that trickles data in,
-// always inside the timeout but slower than we would like, would otherwise
-// keep this loop making "forward progress" forever. The caller passes a
-// deadline covering the entire message so the configured timeout means what
-// it says; NULL leaves the read unbounded.
+// How much of 'deadline' is left, as a struct timeval suitable for
+// SO_RCVTIMEO. Returns false once the deadline has passed.
+static bool time_remaining(const struct timespec &deadline,
+                           struct timeval &tv) {
+    struct timespec now;
+
+    if (-1 == clock_gettime(CLOCK_MONOTONIC, &now)) {
+        return false;
+    }
+
+    time_t secs = deadline.tv_sec - now.tv_sec;
+    long nsecs = deadline.tv_nsec - now.tv_nsec;
+    if (nsecs < 0) {
+        secs -= 1;
+        nsecs += 1000000000L;
+    }
+
+    if (secs < 0) {
+        return false;
+    }
+
+    tv.tv_sec = secs;
+    tv.tv_usec = nsecs / 1000;
+    if (tv.tv_sec == 0 && tv.tv_usec == 0) {
+        // A zeroed SO_RCVTIMEO means "block forever", so round the last
+        // sliver of the deadline up rather than disabling the timeout.
+        tv.tv_usec = 1;
+    }
+    return true;
+}
+
+// SO_RCVTIMEO bounds a single recv() call, not the time spent reading a whole
+// message, and not the time spent across messages either. A peer that
+// trickles data in, always inside the timeout but slower than we would like,
+// would otherwise keep this loop making "forward progress" forever. Each read
+// is instead given whatever is left of the caller's deadline; NULL leaves the
+// read unbounded and SO_RCVTIMEO untouched.
+//
+// Note MSG_WAITALL combined with SO_RCVTIMEO returns a short count rather
+// than -1/EAGAIN when the timeout expires, so an expiry can look like
+// progress here; the check at the top of the loop is what actually bounds a
+// slow trickle.
 static std::string string_read(int fd, ssize_t count, int &error_code,
                                const struct timespec *deadline) {
     char buff[4096];
@@ -90,6 +130,21 @@ static std::string string_read(int fd, ssize_t count, int &error_code,
     error_code = 0;
 
     while (amount_read < count) {
+        if (deadline != NULL) {
+            struct timeval tv;
+
+            if (!time_remaining(*deadline, tv)) {
+                error_code = EAGAIN; // Mapped to TimeoutException by callers.
+                break;
+            }
+
+            if (-1 ==
+                setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv))) {
+                error_code = errno;
+                break;
+            }
+        }
+
         ssize_t rd = recv(
             fd, buff, std::min((ssize_t)(sizeof(buff)), (count - amount_read)),
             MSG_WAITALL);
@@ -100,20 +155,6 @@ static std::string string_read(int fd, ssize_t count, int &error_code,
                 break;
             }
             rc += std::string(buff, rd);
-
-            // Only give up while the read is still short; a message whose
-            // last chunk lands on the deadline is complete and usable.
-            if (deadline != NULL && amount_read < count) {
-                struct timespec now;
-                clock_gettime(CLOCK_MONOTONIC, &now);
-                if (now.tv_sec > deadline->tv_sec ||
-                    (now.tv_sec == deadline->tv_sec &&
-                     now.tv_nsec > deadline->tv_nsec)) {
-                    error_code =
-                        EAGAIN; // Mapped to TimeoutException by callers.
-                    break;
-                }
-            }
         } else if (rd == 0) {
             throw EOFException("");
         } else {
@@ -130,15 +171,10 @@ std::string Transport::msg_recv(int &error_code) {
     error_code = 0;
     unsigned long int payload_len = 0;
 
-    // One deadline spans the header and the payload; giving each read its own
-    // would hand a slow peer the configured timeout twice over.
-    struct timespec deadline;
-    const struct timespec *dl = NULL;
-    if (recv_timeout_seconds > 0) {
-        clock_gettime(CLOCK_MONOTONIC, &deadline);
-        deadline.tv_sec += recv_timeout_seconds;
-        dl = &deadline;
-    }
+    // One absolute deadline spans the header, the payload and every message
+    // that follows; re-arming it here would hand a slow or chatty peer the
+    // configured timeout over and over again.
+    const struct timespec *dl = recv_deadline_active ? &recv_deadline_ts : NULL;
 
     std::string len = string_read(s, HDR_LEN, error_code, dl); // Read length
     if (len.size() && error_code == 0) {
@@ -179,15 +215,31 @@ int Transport::socket_get(const std::string &path, int &error_code) {
     return rc;
 }
 
-int Transport::recv_timeout(int seconds) {
+int Transport::recv_deadline(int seconds) {
+    if (seconds > 0) {
+        if (-1 == clock_gettime(CLOCK_MONOTONIC, &recv_deadline_ts)) {
+            return errno;
+        }
+        recv_deadline_ts.tv_sec += seconds;
+        recv_deadline_active = true;
+        // SO_RCVTIMEO is left alone here; each read sets it to whatever is
+        // left of the deadline.
+        return 0;
+    }
+
+    recv_deadline_active = false;
+
+    // lsmd sets SO_RCVTIMEO on the descriptor before fork() and the plug-in
+    // inherits it, so clearing our deadline has to clear the kernel's timeout
+    // too or an established, registered session that sits idle gets torn
+    // down.
     struct timeval tv;
-    tv.tv_sec = seconds;
+    tv.tv_sec = 0;
     tv.tv_usec = 0;
 
     if (-1 == setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv))) {
         return errno;
     }
-    recv_timeout_seconds = seconds;
     return 0;
 }
 
@@ -280,7 +332,7 @@ void Ipc::errorSend(int error_code, std::string msg, std::string debug,
     }
 }
 
-int Ipc::recv_timeout(int seconds) { return t.recv_timeout(seconds); }
+int Ipc::recv_deadline(int seconds) { return t.recv_deadline(seconds); }
 
 Value Ipc::readRequest(void) {
     int ec;

@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <stdint.h>
 #include <string>
+#include <time.h>
 #include <vector>
 
 #ifdef HAVE_CONFIG_H
@@ -70,11 +71,14 @@ class LSM_DLL_LOCAL Transport {
     std::string msg_recv(int &error_code);
 
     /**
-     * Sets (or clears) a receive timeout on the underlying socket.
-     * @param seconds   Timeout in seconds; 0 clears the timeout (blocking).
+     * Arms (or clears) an absolute receive deadline.
+     * The deadline expires 'seconds' from now and covers every subsequent
+     * read, not just the next one: reading a message does not buy any more
+     * time.  Each recv() is given whatever is left of it.
+     * @param seconds   Seconds from now; 0 clears the deadline (blocking).
      * @return 0 on success, else errno.
      */
-    int recv_timeout(int seconds);
+    int recv_deadline(int seconds);
 
     /**
      * Creates a connected socket (AF_UNIX) to the specified path
@@ -91,8 +95,10 @@ class LSM_DLL_LOCAL Transport {
     void close();
 
   private:
-    int s;                    // Socket descriptor
-    int recv_timeout_seconds; // Set via recv_timeout(); 0 = blocking.
+    int s; // Socket descriptor
+    // Absolute CLOCK_MONOTONIC deadline armed via recv_deadline().
+    struct timespec recv_deadline_ts;
+    bool recv_deadline_active;
 };
 
 /**
@@ -424,11 +430,12 @@ class LSM_DLL_LOCAL Ipc {
     Value readRequest(void);
 
     /**
-     * Sets (or clears) a receive timeout on the underlying transport.
-     * @param seconds   Timeout in seconds; 0 clears the timeout (blocking).
+     * Arms (or clears) an absolute receive deadline on the underlying
+     * transport.  See Transport::recv_deadline().
+     * @param seconds   Seconds from now; 0 clears the deadline (blocking).
      * @return 0 on success, else errno.
      */
-    int recv_timeout(int seconds);
+    int recv_deadline(int seconds);
 
     /**
      * Send a response to a request

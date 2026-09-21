@@ -40,12 +40,12 @@ class TransPort(object):
     # Matches the overflow guard in c_binding/lsm_ipc.cpp Transport::msg_recv
     MAX_MSG_LEN = 0x80000000
 
-    def _read_all(self, l, deadline=None):
+    def _read_all(self, l):
         """
         Reads l number of bytes before returning.  Will raise a SocketEOF
         if socket returns zero bytes (i.e. socket no longer connected), or
-        socket.timeout if deadline (a time.monotonic() value) passes before
-        the read completes.
+        socket.timeout if the deadline armed by set_recv_deadline() passes
+        before the read completes.
         """
 
         if l < 1:
@@ -53,15 +53,20 @@ class TransPort(object):
 
         data = bytearray()
         while len(data) < l:
+            if self._recv_deadline is not None:
+                # settimeout() bounds a single recv() call, so each read gets
+                # what is left of the deadline rather than a fresh copy of the
+                # full timeout.  Note settimeout(0) puts the socket in
+                # non-blocking mode, so an expired deadline has to be handled
+                # here instead of being passed on.
+                remaining = self._recv_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise socket.timeout("timed out")
+                self.s.settimeout(remaining)
             r = self.s.recv(l - len(data))
             if not r:
                 raise _SocketEOF()
             data += r
-            # Only give up while the read is still short; a message whose
-            # last chunk lands on the deadline is complete and usable.
-            if deadline is not None and len(data) < l \
-                    and time.monotonic() > deadline:
-                raise socket.timeout("timed out")
 
         return data.decode("utf-8")
 
@@ -85,23 +90,14 @@ class TransPort(object):
         bytes of the message.
         """
         try:
-            # settimeout() bounds a single recv() call, not the time spent
-            # reading a whole message: a peer trickling bytes in just inside
-            # the timeout could hold the read open forever.  One deadline
-            # spans the header and the payload, so the configured timeout
-            # means what it says rather than applying twice per message.
-            timeout = self.s.gettimeout()
-            deadline = (time.monotonic() + timeout
-                        if timeout is not None else None)
-
-            num_bytes = self._read_all(self.HDR_LEN, deadline)
+            num_bytes = self._read_all(self.HDR_LEN)
             length = int(num_bytes)
             if length >= self.MAX_MSG_LEN:
                 raise LsmError(
                     ErrorNumber.TRANSPORT_COMMUNICATION,
                     "Message length of %d exceeds maximum allowed of %d" %
                     (length, self.MAX_MSG_LEN))
-            msg = self._read_all(length, deadline)
+            msg = self._read_all(length)
             # common.Info("RECV: ", msg)
         except socket.timeout:
             # A receive timeout is distinct from a generic communication
@@ -120,21 +116,34 @@ class TransPort(object):
 
     def __init__(self, socket_descriptor):
         self.s = socket_descriptor
+        self._recv_deadline = None
 
-    def set_recv_timeout(self, seconds):
+    def set_recv_deadline(self, seconds):
         """
-        Sets (or clears) a receive timeout on the underlying socket.  Pass
-        None to clear the timeout and return to blocking behavior.
+        Arms (or clears) an absolute receive deadline.  The deadline expires
+        the given number of seconds from now and covers every subsequent
+        read, not just the next one: reading a message does not buy any more
+        time.  Pass None to clear it and return to blocking behavior.
+
+        Mirrors Transport::recv_deadline() in c_binding/lsm_ipc.cpp, except
+        that the socket timeout each read leaves behind also bounds a send
+        until the deadline is cleared; the C side bounds reads only.
         """
-        self.s.settimeout(seconds)
-        if seconds is None:
-            # settimeout() only manages O_NONBLOCK, so any SO_RCVTIMEO lsmd
-            # set on this descriptor before fork() survives it and a blocking
-            # recv() would still expire - as BlockingIOError rather than
-            # socket.timeout.  Clear it, or an established session that sits
-            # idle past the initial timeout gets torn down.
-            self.s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVTIMEO,
-                              _TIMEVAL_CLEAR)
+        if seconds is not None:
+            self._recv_deadline = time.monotonic() + seconds
+            # The socket timeout is left alone here; each read sets it to
+            # whatever is left of the deadline.
+            return
+
+        self._recv_deadline = None
+        self.s.settimeout(None)
+        # settimeout() only manages O_NONBLOCK, so any SO_RCVTIMEO lsmd set on
+        # this descriptor before fork() survives it and a blocking recv()
+        # would still expire - as BlockingIOError rather than socket.timeout.
+        # Clear it, or an established session that sits idle past the
+        # registration deadline gets torn down.
+        self.s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVTIMEO,
+                          _TIMEVAL_CLEAR)
 
     @staticmethod
     def get_socket(path):
@@ -320,8 +329,8 @@ class _TestTransport(unittest.TestCase):
             reply, msg_id = self.client.read_resp()
             self.assertTrue(payload == reply)
 
-    def test_recv_timeout(self):
-        # With a receive timeout set, an incomplete (or absent) frame must
+    def test_recv_deadline(self):
+        # With a receive deadline armed, an incomplete (or absent) frame must
         # surface as socket.timeout rather than being folded into a generic
         # LsmError, so callers (e.g. a plug-in waiting on an un-registered
         # client) can react to it.  b'' exercises a stalled header read;
@@ -330,43 +339,50 @@ class _TestTransport(unittest.TestCase):
             c, s = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
                 client = TransPort(c)
-                client.set_recv_timeout(0.25)
+                client.set_recv_deadline(0.25)
                 if partial:
                     s.sendall(partial)
                 self.assertRaises(socket.timeout, client._recv_msg)
-                # Clearing the timeout returns to blocking behavior.
-                client.set_recv_timeout(None)
+                # Clearing the deadline returns to blocking behavior.
+                client.set_recv_deadline(None)
                 self.assertIsNone(c.gettimeout())
             finally:
                 c.close()
                 s.close()
 
-    def test_recv_timeout_drip(self):
+    def _drip_server(self, s, header, count, interval, initial_delay=0):
+        """
+        Waits 'initial_delay', sends 'header', then sends 'count' single
+        payload bytes 'interval' apart - never enough to complete the payload
+        the header declares.  Returns the started thread.
+        """
+
+        def drip():
+            try:
+                time.sleep(initial_delay)
+                if header:
+                    s.sendall(header)
+                for _ in range(count):
+                    time.sleep(interval)
+                    s.sendall(b'x')
+            except OSError:
+                return
+
+        t = threading.Thread(target=drip)
+        t.start()
+        return t
+
+    def test_recv_deadline_bounds_whole_message(self):
         # A peer declares a 50 byte payload, then keeps sending a trickle of
         # payload bytes one at a time, each arriving well inside the
-        # configured timeout, but never enough to complete the declared
-        # payload. The timeout must bound the whole read, not just each
-        # individual recv() call, otherwise this drip defeats it and
-        # _recv_msg() never raises.
+        # deadline, but never enough to complete the declared payload.  The
+        # deadline must bound the whole read, not just each individual recv()
+        # call, otherwise this drip defeats it and _recv_msg() never raises.
         c, s = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             client = TransPort(c)
-            client.set_recv_timeout(0.3)
-
-            def drip():
-                try:
-                    s.sendall(b'0000000050')
-                except OSError:
-                    return
-                for _ in range(8):
-                    try:
-                        s.sendall(b'x')
-                    except OSError:
-                        return
-                    time.sleep(0.15)
-
-            dripper = threading.Thread(target=drip)
-            dripper.start()
+            client.set_recv_deadline(0.3)
+            dripper = self._drip_server(s, b'0000000050', 8, 0.15)
             try:
                 start = time.monotonic()
                 self.assertRaises(socket.timeout, client._recv_msg)
@@ -378,7 +394,73 @@ class _TestTransport(unittest.TestCase):
             c.close()
             s.close()
 
-    def test_recv_timeout_cleared_in_kernel(self):
+    def test_recv_deadline_spans_header_and_payload(self):
+        # The header can land just before the deadline; the payload read that
+        # follows must inherit what is left of it rather than starting with a
+        # fresh full timeout of its own, which would let a peer stretch a
+        # single message to roughly twice the configured bound.
+        c, s = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            client = TransPort(c)
+            client.set_recv_deadline(1.0)
+            # A complete header at ~0.9s, then the peer stalls forever.
+            late = self._drip_server(s, b'0000000050', 0, 0,
+                                     initial_delay=0.9)
+            try:
+                start = time.monotonic()
+                self.assertRaises(socket.timeout, client._recv_msg)
+                elapsed = time.monotonic() - start
+                self.assertLess(
+                    elapsed, 1.5,
+                    "payload read started a fresh timeout (elapsed %.2fs)" %
+                    elapsed)
+            finally:
+                late.join()
+        finally:
+            c.close()
+            s.close()
+
+    def test_recv_deadline_spans_messages(self):
+        # A deadline that restarted on every message would let an
+        # un-registered peer keep a plug-in alive forever by sending one
+        # junk-but-parseable request just inside each window.  Reading a
+        # complete message must not buy any more time.
+        c, s = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            client = TransPort(c)
+            peer = TransPort(s)
+            client.set_recv_deadline(1.0)
+
+            # The request arrives late in the deadline, so a deadline that
+            # restarted here would buy the peer a whole extra window.
+            def late_request():
+                time.sleep(0.8)
+                try:
+                    peer.send_req('systems', None)
+                except OSError:
+                    pass
+
+            sender = threading.Thread(target=late_request)
+            sender.start()
+            try:
+                start = time.monotonic()
+                msg = client.read_req()
+                self.assertEqual(msg['method'], 'systems')
+
+                # Peer has gone quiet; the original deadline still applies.
+                self.assertRaises(socket.timeout, client._recv_msg)
+                elapsed = time.monotonic() - start
+                self.assertLess(
+                    elapsed, 1.5,
+                    "deadline restarted after a successful read "
+                    "(elapsed %.2fs)" % elapsed)
+            finally:
+                sender.join()
+        finally:
+            c.close()
+            s.close()
+
+    def test_recv_deadline_cleared_in_kernel(self):
         # lsmd sets SO_RCVTIMEO on the client socket before fork() and the
         # plug-in inherits it.  settimeout(None) only clears O_NONBLOCK, so
         # unless the kernel timeout is cleared too an established session
@@ -388,8 +470,8 @@ class _TestTransport(unittest.TestCase):
             c.setsockopt(socket.SOL_SOCKET, socket.SO_RCVTIMEO,
                          struct.pack("@ll", 1, 0))
             client = TransPort(c)
-            client.set_recv_timeout(1)
-            client.set_recv_timeout(None)
+            client.set_recv_deadline(1)
+            client.set_recv_deadline(None)
 
             self.assertEqual(
                 struct.unpack(

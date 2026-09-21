@@ -2443,9 +2443,13 @@ static int lsm_plugin_run(lsm_plugin_ptr p) {
     lsm_flag flags = 0;
 
     if (LSM_IS_PLUGIN(p)) {
-        /* Bound the pre-registration read so a client that connects but never
-         * completes plugin_register cannot block this worker indefinitely. */
-        p->tp->recv_timeout(LSM_PLUGIN_INITIAL_RECV_TIMEOUT_SECONDS);
+        /* One absolute deadline for the whole registration handshake, armed
+         * before the first read: an un-registered client cannot stretch it by
+         * keeping the conversation alive with requests we reject, the way a
+         * per-message timeout let it.  Note this bounds reads only - msg_send
+         * still blocks indefinitely on a peer that stops reading our replies.
+         */
+        p->tp->recv_deadline(LSM_PLUGIN_INITIAL_RECV_TIMEOUT_SECONDS);
 
         while (true) {
             try {
@@ -2466,10 +2470,10 @@ static int lsm_plugin_run(lsm_plugin_ptr p) {
                     if (LSM_ERR_OK == rc || LSM_ERR_JOB_STARTED == rc) {
                         p->tp->responseSend(resp);
 
-                        /* Client has registered; be lenient from here on so
-                         * slow operations are never interrupted. */
+                        /* Client has registered; drop the deadline so slow
+                         * operations are never interrupted. */
                         if (method == "plugin_register") {
-                            p->tp->recv_timeout(0);
+                            p->tp->recv_deadline(0);
                         }
                     } else {
                         error_send(p, rc);

@@ -14,11 +14,12 @@ import errno
 from lsm._common import SocketEOF as _SocketEOF
 from lsm._transport import TransPort
 
-# Receive timeout (seconds) enforced while the client has not yet completed
-# plugin_register.  Kept consistent with the C binding
+# How long (seconds) a client has to complete plugin_register.  Turned into a
+# single absolute deadline covering every read until registration, so a peer
+# cannot renew it by sending requests.  Kept consistent with the C binding
 # (LSM_PLUGIN_INITIAL_RECV_TIMEOUT_SECONDS in c_binding/lsm_ipc_timeout.h).
 # Cleared once the client registers so slow operations are never interrupted.
-INITIAL_RECV_TIMEOUT = 30
+REGISTRATION_TIMEOUT = 30
 
 
 def search_property(lsm_objs, search_key, search_value):
@@ -83,9 +84,12 @@ class PluginRunner(object):
         need_shutdown = False
         msg_id = 0
 
-        # Bound the pre-registration read so a client that connects but never
-        # completes plugin_register cannot block this worker indefinitely.
-        self.tp.set_recv_timeout(INITIAL_RECV_TIMEOUT)
+        # One absolute deadline for the whole registration handshake, armed
+        # before the first read: an un-registered client cannot stretch it by
+        # keeping the conversation alive with requests we reject, the way a
+        # per-message timeout let it.  Note this bounds reads only - a peer
+        # that stops reading our replies is a separate problem.
+        self.tp.set_recv_deadline(REGISTRATION_TIMEOUT)
 
         try:
             while True:
@@ -117,9 +121,9 @@ class PluginRunner(object):
 
                     if method == 'plugin_register':
                         need_shutdown = True
-                        # Client has registered; be lenient from here on so
-                        # slow operations are never interrupted.
-                        self.tp.set_recv_timeout(None)
+                        # Client has registered; drop the deadline so slow
+                        # operations are never interrupted.
+                        self.tp.set_recv_deadline(None)
 
                     if method == 'plugin_unregister':
                         # This is a graceful plugin_unregister

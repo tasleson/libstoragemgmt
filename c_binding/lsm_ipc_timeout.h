@@ -9,12 +9,14 @@
 #ifndef LSM_IPC_TIMEOUT_H
 #define LSM_IPC_TIMEOUT_H
 
-/* Receive timeout (seconds) enforced on a plug-in's IPC socket while the
- * client has not yet completed plugin_register. Shared by the daemon
- * (defense-in-depth SO_RCVTIMEO set before fork()) and the C plug-in runner;
- * kept consistent with INITIAL_RECV_TIMEOUT in
- * python_binding/lsm/_pluginrunner.py. Cleared (0) once the client
- * registers, so slow post-registration operations are never interrupted. */
+/* How long (seconds) a client has to complete plugin_register before the
+ * plug-in gives up on it. The plug-in runners turn this into a single
+ * absolute deadline covering every read until registration, so a peer cannot
+ * renew it by sending requests. The daemon uses the same value for the
+ * defense-in-depth SO_RCVTIMEO it sets before fork(). Kept consistent with
+ * REGISTRATION_TIMEOUT in python_binding/lsm/_pluginrunner.py. Cleared once
+ * the client registers, so slow post-registration operations are never
+ * interrupted. */
 #define LSM_PLUGIN_INITIAL_RECV_TIMEOUT_SECONDS 30
 
 #endif
