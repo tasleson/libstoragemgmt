@@ -7,6 +7,7 @@
 #include "../c_binding/lsm_ipc.hpp"
 #include "libstoragemgmt/libstoragemgmt_error.h"
 
+#include <cstdint>
 #include <ctime>
 #include <iomanip>
 #include <sstream>
@@ -17,6 +18,15 @@
 /* check.h's "fail" macro clashes with std::basic_ios::fail(), so it must be
  * included only after all standard library headers are pulled in. */
 #include <check.h>
+
+/*
+ * Milliseconds on CLOCK_MONOTONIC, for elapsed time assertions.
+ */
+static int64_t monotonic_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
 
 /*
  * Writes a raw, zero-padded header declaring a payload of 'declared_len'
@@ -215,6 +225,84 @@ START_TEST(test_recv_deadline_drip) {
 }
 END_TEST
 
+START_TEST(test_recv_deadline_spans_messages) {
+    int fds[2];
+    ck_assert_int_eq(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+
+    /* A deadline that restarted on every message would let an un-registered
+     * peer hold a plug-in forever by sending one junk-but-parseable request
+     * just inside each window.  Reading a complete message must not buy any
+     * more time, so the second read has to expire at the original deadline. */
+    Ipc peer(fds[1]);
+    Ipc ipc(fds[0]);
+    ck_assert_int_eq(ipc.recv_deadline(1), 0);
+
+    int64_t start = monotonic_ms();
+
+    /* The request arrives late in the deadline (and is buffered by the
+     * socketpair), so a deadline that restarted here would buy the peer a
+     * whole extra window. */
+    usleep(800000);
+    peer.requestSend("systems", Value());
+    Value req = ipc.readRequest();
+    ck_assert_msg(req.isValidRequest(), "Expected a valid first request");
+
+    bool caught_timeout = false;
+    try {
+        ipc.readRequest(); /* Peer has gone quiet. */
+    } catch (const TimeoutException &) {
+        caught_timeout = true;
+    }
+    int64_t elapsed = monotonic_ms() - start;
+
+    ck_assert_msg(caught_timeout,
+                  "Expected TimeoutException on the read after a successful "
+                  "one");
+    ck_assert_msg(elapsed < 1500,
+                  "deadline restarted after a successful read (elapsed %lld "
+                  "ms)",
+                  (long long)elapsed);
+}
+END_TEST
+
+START_TEST(test_recv_deadline_spans_header_and_payload) {
+    int fds[2];
+    ck_assert_int_eq(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+
+    Ipc ipc(fds[0]);
+    ck_assert_int_eq(ipc.recv_deadline(2), 0);
+
+    /* The header lands just inside the deadline and the peer then stalls.
+     * The payload read must inherit what is left of the deadline rather than
+     * getting a fresh SO_RCVTIMEO of its own, which would stretch a single
+     * message to roughly twice the configured bound. */
+    std::thread late_header([&]() {
+        usleep(1700000); /* 1.7s, inside the 2s deadline */
+        const char hdr[] = "0000000050";
+        if (write(fds[1], hdr, sizeof(hdr) - 1) != (ssize_t)sizeof(hdr) - 1)
+            return;
+    });
+
+    int64_t start = monotonic_ms();
+    bool caught_timeout = false;
+    try {
+        ipc.readRequest();
+    } catch (const TimeoutException &) {
+        caught_timeout = true;
+    }
+    int64_t elapsed = monotonic_ms() - start;
+
+    late_header.join();
+    close(fds[1]);
+
+    ck_assert_msg(caught_timeout,
+                  "Expected TimeoutException on a stalled payload");
+    ck_assert_msg(elapsed < 3000,
+                  "payload read started a fresh timeout (elapsed %lld ms)",
+                  (long long)elapsed);
+}
+END_TEST
+
 static Suite *ipc_suite(void) {
     Suite *s = suite_create("ipc");
     TCase *tc = tcase_create("core");
@@ -225,6 +313,8 @@ static Suite *ipc_suite(void) {
     tcase_add_test(tc, test_recv_deadline_partial_header);
     tcase_add_test(tc, test_recv_deadline_cleared);
     tcase_add_test(tc, test_recv_deadline_drip);
+    tcase_add_test(tc, test_recv_deadline_spans_messages);
+    tcase_add_test(tc, test_recv_deadline_spans_header_and_payload);
     suite_add_tcase(s, tc);
     return s;
 }

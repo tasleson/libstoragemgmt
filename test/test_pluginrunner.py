@@ -105,6 +105,48 @@ class TestPluginRunner(unittest.TestCase):
             plugin_sock.close()
             client_sock.close()
 
+    def test_pre_auth_chatter_does_not_extend_deadline(self):
+        """The registration deadline is absolute.  A client that keeps the
+        conversation going with requests the plug-in rejects must still be cut
+        off at the original deadline; a per-message timeout would let it hold
+        the worker (and its plug-in process) forever."""
+        deadline = _pluginrunner.REGISTRATION_TIMEOUT
+        plugin_sock, client_sock = socket.socketpair(socket.AF_UNIX,
+                                                     socket.SOCK_STREAM)
+        # Bound each client side read so a dead worker costs us one deadline,
+        # not a hang.
+        client_sock.settimeout(deadline)
+        try:
+            thread = self._start_runner(plugin_sock)
+            client = TransPort(client_sock)
+
+            start = time.monotonic()
+            while thread.is_alive() and \
+                    time.monotonic() - start < deadline * 6:
+                try:
+                    client.send_req('no_such_method', {'flags': 0})
+                    client.read_resp()
+                except _common.LsmError:
+                    # The expected "unsupported operation" reply; keep going.
+                    pass
+                except (socket.timeout, OSError):
+                    # Worker stopped answering, i.e. it gave up on us.
+                    break
+                time.sleep(deadline / 6)
+
+            thread.join(timeout=2)
+            elapsed = time.monotonic() - start
+            self.assertFalse(
+                thread.is_alive(),
+                "plug-in kept running while an un-registered client chattered")
+            self.assertLess(
+                elapsed, deadline * 4,
+                "registration deadline was renewed by each request "
+                "(elapsed %.2fs, deadline %.2fs)" % (elapsed, deadline))
+        finally:
+            plugin_sock.close()
+            client_sock.close()
+
     def test_post_register_leniency(self):
         """After plugin_register the timeout must be cleared so an idle gap
         longer than the pre-auth timeout does not kill an established
