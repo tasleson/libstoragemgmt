@@ -1,17 +1,15 @@
 #!/bin/bash
 
-# # To debug, try:
-# docker pull fedora
-# docker run --privileged --rm=false --tty=true --interactive=true \
-#    -v `pwd`:/libstoragemgmt-code:rw fedora \
-#    /bin/bash -c /libstoragemgmt-code/test/docker_ci_test.sh
+# This is the script CI (and test/podman_test.sh) run inside a fresh
+# container to build and test libstoragemgmt from scratch.
 #
-# or
+# To run it locally in a Fedora podman container:
+#   test/podman_test.sh
 #
+# To debug interactively instead, try:
 # podman run --privileged --rm=false --tty=true --interactive=true \
-# -v `pwd`/libstoragemgmt:/libstoragemgmt:rw,z -i -t fedora
-# /bin/bash -c "cd /libstoragemgmt && pwd && test/docker_ci_test.sh"
-#
+# -v `pwd`:/libstoragemgmt-code:rw,z -i -t fedora \
+# /bin/bash -c "cd /libstoragemgmt-code && test/docker_ci_test.sh"
 
 if [ -e "/etc/debian_version" ];then
     IS_DEB=1
@@ -82,6 +80,9 @@ V=1 make || exit 1
 V=1 make check || { cat test-suite.log; exit 1; }
 
 if [ "CHK$IS_PY3" == "CHK1" ];then
+    echo "Testing 'make distcheck'"
+    V=1 make distcheck || { cat */test-suite.log 2>/dev/null; exit 1; }
+
     echo "Testing 'make rpm'"
     make rpm || exit 1
 fi
