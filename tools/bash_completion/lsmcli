@@ -56,6 +56,31 @@ function arg_index()
 	return 255
 }
 
+# Fill COMPREPLY with the values of the requested column of a 'lsmcli list'.
+# $1 Value for --type
+# $2 Column number to use as the completion value
+# $@ Any remaining arguments are passed to lsmcli as-is
+#
+# Note: We cannot use 'compgen -W' here as it expands the word list, which
+# would execute command substitution, eg. $(...), embedded in a name returned
+# by a plugin, so do the prefix matching ourselves instead.
+function lsm_values()
+{
+    local list_type="$1"
+    local column="$2"
+    local item
+    local -a fields
+    shift 2
+
+    COMPREPLY=()
+    # ${sep} is not white space, so read splits the line on it alone and
+    # values keep any spaces they contain.
+    while IFS="${sep}" read -r -a fields ; do
+        item="${fields[column-1]:-}"
+        [[ -n ${item} && ${item} == "${cur}"* ]] && COMPREPLY+=("${item}")
+    done < <(lsmcli list --type "${list_type}" -t"${sep}" "$@")
+}
+
 function _lsm()
 {
     local cur prev opts
@@ -153,33 +178,23 @@ function _lsm()
         # Check if we have somthing present that we can help the user with
         case "${prev}" in
             --sys)
-                # Is there a better way todo this?
-                local items=`lsmcli list --type systems -t${sep} | awk -F ${sep} '{print $1}'`
-                COMPREPLY=( $(compgen -W "${items}" -- ${cur}) )
+                lsm_values systems 1
                 return 0
                 ;;
             --pool)
-                # Is there a better way todo this?
-                local items=`lsmcli list --type pools -t${sep} | awk -F ${sep} '{print $1}'`
-                COMPREPLY=( $(compgen -W "${items}" -- ${cur}) )
+                lsm_values pools 1
                 return 0
                 ;;
             --vol|--src-vol|--dst-vol)
-                # Is there a better way todo this?
-                local items=`lsmcli list --type volumes -t${sep} | awk -F ${sep} '{print $1}'`
-                COMPREPLY=( $(compgen -W "${items}" -- ${cur}) )
+                lsm_values volumes 1
                 return 0
                 ;;
             --disk)
-                # Is there a better way todo this?
-                local items=`lsmcli list --type disks -t${sep} | awk -F ${sep} '{print $1}'`
-                COMPREPLY=( $(compgen -W "${items}" -- ${cur}) )
+                lsm_values disks 1
                 return 0
                 ;;
             --ag)
-                # Is there a better way todo this?
-                local items=`lsmcli list --type access_groups -t${sep} | awk -F ${sep} '{print $1}'`
-                COMPREPLY=( $(compgen -W "${items}" -- ${cur}) )
+                lsm_values access_groups 1
                 return 0
                 ;;
             --init)
@@ -187,37 +202,27 @@ function _lsm()
                 i=$?
                 # We have an access group present on the command line so filter the intiators to it
                 if [[ ${i} -ne 255 ]]; then
-                    # It would be better if we filtered the result with the access group
-                    # if it's present on the command line already.
-                    local items=`lsmcli list --type access_groups -t${sep} --ag ${COMP_WORDS[${i}+1]} | awk -F ${sep} '{print $3}'`
-                    COMPREPLY=( $(compgen -W "${items}" -- ${cur}) )
+                    lsm_values access_groups 3 --ag "${COMP_WORDS[${i}+1]}"
                     return 0
                 else
-                    local items=`lsmcli list --type access_groups -t${sep} | awk -F ${sep} '{print $3}'`
-                    COMPREPLY=( $(compgen -W "${items}" -- ${cur}) )
+                    lsm_values access_groups 3
                     return 0
                 fi
                 ;;
             --nfs-export)
-                # Is there a better way todo this?
-                local items=`lsmcli list --type exports  -t${sep} | awk -F ${sep} '{print $1}'`
-                COMPREPLY=( $(compgen -W "${items}" -- ${cur}) )
+                lsm_values exports 1
                 return 0
                 ;;
             --tgt)
-                # Is there a better way todo this?
-                local items=`lsmcli list --type target_ports  -t${sep} | awk -F ${sep} '{print $1}'`
-                COMPREPLY=( $(compgen -W "${items}" -- ${cur}) )
+                lsm_values target_ports 1
                 return 0
                 ;;
             --fs|--src-fs)
-                local items=`lsmcli list --type fs -t${sep} | awk -F ${sep} '{print $1}'`
-                COMPREPLY=( $(compgen -W "${items}" -- ${cur}) )
+                lsm_values fs 1
                 return 0
                 ;;
             --export)
-                local items=`lsmcli list --type exports -t${sep} | awk -F ${sep} '{print $1}'`
-                COMPREPLY=( $(compgen -W "${items}" -- ${cur}) )
+                lsm_values exports 1
                 return 0
                 ;;
             --snap)
@@ -225,18 +230,15 @@ function _lsm()
                 i=$?
                 # We have an access group present on the command line so filter the snapshots to it
                 if [[ ${i} -ne 255 ]]; then
-                    local items=`lsmcli list --type snapshots \
-                        --fs ${COMP_WORDS[${i}+1]} -t${sep} | awk -F ${sep} '{print $1}'`
-                    COMPREPLY=( $(compgen -W "${items}" -- ${cur}) )
+                    lsm_values snapshots 1 --fs "${COMP_WORDS[${i}+1]}"
                     return 0
                 else
-                    COMPREPLY=( $(compgen -W "" -- ${cur}) )
+                    COMPREPLY=()
                     return 0
                 fi
                 ;;
             --auth-type)
-                local items=`lsmcli list --type nfs_client_auth -t ' '`
-                COMPREPLY=( $(compgen -W "${items}" -- ${cur}) )
+                lsm_values nfs_client_auth 1
                 return 0
                 ;;
             *)
