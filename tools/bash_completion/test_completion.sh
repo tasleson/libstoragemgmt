@@ -10,9 +10,15 @@
 
 set -u
 
+# Run once more with LSM_TEST_STRICT set, see the end of this file: _lsm is
+# then run with set -e and with the shell options that change how patterns
+# match, as a user's shell might have them.
+strict=${LSM_TEST_STRICT-}
+
 # Nothing here may wait for input, so a failure reports rather than hangs.
 exec < /dev/null
 
+self="$(readlink -f "$0")"
 srcdir=${srcdir:-$(dirname "$0")}
 completion_script="$(readlink -f "${srcdir}/lsmcli")"
 
@@ -123,7 +129,7 @@ source "${completion_script}"
 failures=0
 
 # Every function the completion script defines, sorted as the C locale does.
-lsm_funcs='_lsm _lsm_ansi_c _lsm_arg_index _lsm_escape _lsm_flag_value _lsm_join _lsm_listcontains _lsm_options _lsm_ordinal _lsm_possible_args _lsm_scan _lsm_unescape _lsm_values'
+lsm_funcs='_lsm _lsm_ansi_c _lsm_arg_index _lsm_complete _lsm_escape _lsm_flag_value _lsm_join _lsm_known_option _lsm_layout _lsm_listcontains _lsm_options _lsm_ordinal _lsm_possible_args _lsm_run _lsm_scan _lsm_unescape _lsm_values'
 
 function fail()
 {
@@ -144,14 +150,36 @@ function check_words()
     shift 2
     COMP_WORDS=("$@")
     COMPREPLY=()
-    # The line as typed, which a test sets when it matters.
+    # The line as typed, and where the cursor is in it. Unless a test says,
+    # it is the words with white space between them as bash would have it:
+    # none before or after the : and = that bash makes words of, and the cursor
+    # at the end.
     COMP_LINE="${test_line-}"
+    if [[ -z ${test_line+set} ]] ; then
+        local i
+        COMP_LINE=''
+        for (( i = 0; i < $#; i++ )) ; do
+            if (( i > 0 )) && [[ ${COMP_WORDS[i]} != [:=] && ${COMP_WORDS[i-1]} != [:=] ]] ; then
+                COMP_LINE+=' '
+            fi
+            COMP_LINE+="${COMP_WORDS[i]}"
+        done
+    fi
+    COMP_POINT="${test_point-${#COMP_LINE}}"
 
     rm -f "${LSM_TEST_ARGV}"
     # Anything written to stderr lands on the user's command line, and it is
     # also where the shell reports a glob that matched nothing under failglob.
+    if [[ -n ${strict} ]] ; then
+        set -e
+        shopt -s nocasematch extglob nocaseglob
+    fi
     _lsm 2> "${tmp_dir}/stderr"
     rc=$?
+    if [[ -n ${strict} ]] ; then
+        set +e
+        shopt -u nocasematch extglob nocaseglob
+    fi
     err=$(cat "${tmp_dir}/stderr")
     [[ -n ${err} ]] && fail "'${COMP_WORDS[*]}' wrote to stderr: ${err}"
 
@@ -329,6 +357,8 @@ lsmcli capabilities --sys|'sys'\ th|sys\ three
 lsmcli capabilities --sys|"sys"' th| three
 lsmcli capabilities --sys|sys\ $'th|three
 lsmcli capabilities --sys|$'t\t|t\tb
+lsmcli capabilities --sys|$'t\T|
+lsmcli capabilities --sys|$'t\X09|
 lsmcli capabilities --sys|$'t\x09|t\tb
 lsmcli capabilities --sys|$'t\011b'|$'t\tb'
 lsmcli capabilities --sys|$'t\n|
@@ -390,7 +420,7 @@ TABLE
 # Last word, the one completed, is always empty here.
 check_words "${PAYLOAD_ESC}|init-two" 4 lsmcli x --ag --init ""
 check_stub_args no "[--ag]" "--init after a --ag with no value"
-check_words "${PAYLOAD_ESC}|init-two" 5 lsmcli x --ag "" --init ""
+check_words "${PAYLOAD_ESC}|init-two" 5 lsmcli x --ag '""' --init ""
 check_stub_args no "[--ag]" "--init after an empty --ag value"
 # The flag is the last word, being completed itself, so there is nothing after.
 check_words "" 3 lsmcli x --init --ag
@@ -399,7 +429,7 @@ check_stub_args no "[--ag]" "--ag is the last word"
 # --snap with no --fs to filter on offers nothing, and does not ask lsmcli.
 check_words "" 4 lsmcli x --fs --snap ""
 check_stub_args no "[--fs]" "--snap after a --fs with no value"
-check_words "" 5 lsmcli x --fs "" --snap ""
+check_words "" 5 lsmcli x --fs '""' --snap ""
 [[ -e ${LSM_TEST_ARGV} ]] && fail "--snap with an empty --fs ran lsmcli"
 check_words "" 3 lsmcli x --snap ""
 
@@ -473,6 +503,11 @@ cmd_tests=(
     "lsmcli -u sim : // -b list --type SNAPSHOTS||--fs"
     "lsmcli x --type snapshots||"
     "lsmcli list snapshots|--ty|--type"
+    # A word of the sub command being typed in full is still wanted.
+    "lsmcli access-group-add|--ag|--ag"
+    # Case matters, whatever the shell's nocasematch is.
+    "lsmcli VOLUME-DELETE||"
+    "lsmcli x --SYS||"
 )
 for t in "${cmd_tests[@]}" ; do
     IFS='|' read -r comp_line cur expected_head rest <<< "${t}"
@@ -651,19 +686,106 @@ check_stub_args no "[-u]" "-t on the command line"
 check_end "init-filtered" lsmcli -u sim : // access-group-add --ag ag-one --init ""
 check_stub_args yes "[-u][sim://]" "--init filtered by --ag"
 check_stub_args yes "[--ag][ag-one]" "--init filtered by --ag"
-# The words say nothing of white space, the line does. 'sim: volume-delete' is
-# not a URI of sim:volume-delete, so there is no telling what the URI is and
-# no look-up is made, rather than one against some other array.
+# The line says where white space was, which the words do not. Here that is
+# -u sim: and volume-delete is a word of its own, so the URI is sim:
 test_line='lsmcli -u sim: volume-delete --vol '
-check_end "" lsmcli -u sim : volume-delete --vol ""
-[[ -e ${LSM_TEST_ARGV} ]] && fail "lsmcli run with a URI that cannot be made out"
+check_words "${PAYLOAD_ESC}|vol-one" 6 lsmcli -u sim : volume-delete --vol ""
+check_stub_args yes "[-u][sim:]" "a URI that ends in a :"
+# The same words as sim:volume-delete, which is a URI of its own, and what is
+# on the line does not say sim:
+test_line='lsmcli -u sim:volume-delete vd --vol '
+check_words "${PAYLOAD_ESC}|vol-one" 7 lsmcli -u sim : volume-delete vd --vol ""
+check_stub_args yes "[-u][sim:volume-delete]" "a URI with a : in it"
 test_line='lsmcli -u sim:// volume-delete --vol '
 check_end "${PAYLOAD_ESC}|vol-one" lsmcli -u sim : // volume-delete --vol ""
 check_stub_args yes "[-u][sim://]" "a URI that is in the line as typed"
 test_line='lsmcli -u "" volume-delete --vol '
 check_end "" lsmcli -u '""' volume-delete --vol ""
 [[ -e ${LSM_TEST_ARGV} ]] && fail "lsmcli run with an empty URI"
-test_line=''
+unset test_line
+
+# The URI is the one on the line however it is given, and whatever the line
+# has after the cursor, as global options are accepted there too. Where it
+# cannot be said for certain there is no look-up. Word by word as bash gives
+# them, where = and : are not in COMP_WORDBREAKS the whole is one word.
+check_end "${PAYLOAD_ESC}|vol-one" lsmcli --uri=sim://x vd --vol ""
+check_stub_args yes "[-u][sim://x]" "--uri=sim://x as one word"
+check_end "${PAYLOAD_ESC}|vol-one" lsmcli -t, --uri=sim://x vd --vol ""
+check_stub_args yes "[-u][sim://x]" "--terse=, before --uri=sim://x"
+check_end "${PAYLOAD_ESC}|vol-one" lsmcli vd --terse=, --vol x --force --vol ""
+check_stub_args no "[-u]" "the options of the sub command"
+# An option that is not known could be --uri, abbreviated or not.
+for unknown in --ur=sim://x --x=y --ur --u --zz ; do
+    check_end "" lsmcli "${unknown}" vd --vol ""
+    [[ -e ${LSM_TEST_ARGV} ]] && fail "${unknown} before the sub command, but lsmcli was run"
+    check_end "" lsmcli vd "${unknown}" sim://x --vol ""
+    [[ -e ${LSM_TEST_ARGV} ]] && fail "${unknown} after the sub command, but lsmcli was run"
+done
+# A later -u makes up for what is before it, and not for what is after it.
+check_end "${PAYLOAD_ESC}|vol-one" lsmcli --ur x -u sim : // vd --vol ""
+check_stub_args yes "[-u][sim://]" "-u after an option that is not known"
+check_end "" lsmcli -u sim : // --ur x vd --vol ""
+[[ -e ${LSM_TEST_ARGV} ]] && fail "--ur after -u, but lsmcli was run"
+# The cursor is in the middle of the line, with -u after it.
+test_line='lsmcli vd --vol  -u sim://x'
+test_point=16
+check_words "${PAYLOAD_ESC}|vol-one" 3 lsmcli vd --vol "" -u sim : //x
+check_stub_args yes "[-u][sim://x]" "-u after the cursor"
+check_words "${PAYLOAD_ESC}|vol-one" 3 lsmcli vd --vol "" -u sim : //x
+test_line='lsmcli -u a:b vd --vol  -u c'
+test_point=23
+check_words "${PAYLOAD_ESC}|vol-one" 7 lsmcli -u a : b vd --vol "" -u c
+check_stub_args yes "[-u][c]" "the last -u, after the cursor"
+test_line='lsmcli vd --vol  --uri=sim://y'
+test_point=16
+check_words "${PAYLOAD_ESC}|vol-one" 3 lsmcli vd --vol "" --uri = sim : //y
+check_stub_args yes "[-u][sim://y]" "--uri= after the cursor"
+test_line='lsmcli vd --vol  -u'
+test_point=16
+check_words "" 3 lsmcli vd --vol "" -u
+[[ -e ${LSM_TEST_ARGV} ]] && fail "-u with no value after the cursor, but lsmcli was run"
+unset test_line test_point
+# What is typed, not just the words, says where there was white space. This
+# line has -u a, and the b is another word, which is what a substring of the
+# line would not tell.
+test_line='lsmcli -u a : b vd --name a:b --vol '
+check_end "${PAYLOAD_ESC}|vol-one" lsmcli -u a : b vd --name a : b --vol ""
+check_stub_args yes "[-u][a]" "-u a : b"
+unset test_line
+# Words that are not in the line say nothing is known, and a look-up for the
+# URI that is on it is then not to be made. A line with no URI is as it was.
+test_line='something else'
+check_end "${PAYLOAD_ESC}|vol-one" lsmcli vd --vol ""
+check_stub_args no "[-u]" "no URI, layout not known"
+check_end "" lsmcli -u sim vd --vol ""
+[[ -e ${LSM_TEST_ARGV} ]] && fail "-u with the layout not known, but lsmcli was run"
+unset test_line
+
+# Filters read from the line are put back together too: bash splits foo:bar
+# into three words and --ag=foo into three. A value that cannot be told is not
+# left out, as that would be the wrong list. Given more than once the last
+# counts.
+check_end "init-filtered" lsmcli aa --ag foo : bar --init ""
+check_stub_args yes "[--ag][foo:bar]" "--ag foo:bar"
+check_end "init-filtered" lsmcli aa --ag = foo --init ""
+check_stub_args yes "[--ag][foo]" "--ag=foo"
+check_end "init-filtered" lsmcli aa --ag a --ag b --init ""
+check_stub_args yes "[--ag][b]" "--ag twice"
+check_end "${PAYLOAD_ESC}|snap-one" lsmcli fs-snap-delete --fs a = b --snap ""
+check_stub_args yes "[--fs][a=b]" "--fs a=b"
+check_end "${PAYLOAD_ESC}|snap-one" lsmcli fs-clone --src-fs 'a\:b' --dst-name n --backing-snapshot ""
+check_stub_args yes "[--fs][a:b]" "--src-fs a\\:b"
+check_end "" lsmcli aa --ag=foo --init ""
+[[ -e ${LSM_TEST_ARGV} ]] && fail "--init with --ag=foo as one word ran lsmcli"
+check_end "" lsmcli fs-snap-delete --fs=foo --snap ""
+[[ -e ${LSM_TEST_ARGV} ]] && fail "--snap with --fs=foo as one word ran lsmcli"
+test_line='lsmcli aa --ag foo --init '
+check_end "init-filtered" lsmcli aa --ag foo --init ""
+unset test_line
+test_line='nothing'
+check_end "" lsmcli aa --ag foo --init ""
+[[ -e ${LSM_TEST_ARGV} ]] && fail "--init with the layout not known ran lsmcli"
+unset test_line
 
 # More words than an exit status can count, with --ag at a position that a
 # status truncated modulo 256 would get wrong, or confuse with 'not found'.
@@ -752,7 +874,7 @@ done
 # After completing nothing is left behind in the shell, not even a variable or
 # function of the script's own, other than the functions it is made of.
 leaked=$(env LC_ALL=C LSMCLI_AUTO_COMPLETE_VALUE=1 bash --noprofile --norc -c '
-    COMP_WORDS=() COMP_CWORD=0 COMPREPLY=() words=() line= before_vars= before_funcs=
+    COMP_WORDS=() COMP_CWORD=0 COMPREPLY=() COMP_LINE= COMP_POINT= words=() line= before_vars= before_funcs=
     before_vars=$(compgen -v | sort)
     before_funcs=$(compgen -A function | sort)
     source "$1"
@@ -763,6 +885,7 @@ leaked=$(env LC_ALL=C LSMCLI_AUTO_COMPLETE_VALUE=1 bash --noprofile --norc -c '
                 "lsmcli foo" ; do
         read -r -a COMP_WORDS <<< "${line}"
         COMP_WORDS+=("")
+        COMP_LINE="${line} " COMP_POINT=$(( ${#line} + 1 ))
         COMP_CWORD=$(( ${#COMP_WORDS[@]} - 1 ))
         _lsm
     done
@@ -831,6 +954,7 @@ leaks=$(env LSMCLI_AUTO_COMPLETE_VALUE=1 bash --noprofile --norc -c '
                  "lsmcli x --ag a --init" ; do
         read -r -a COMP_WORDS <<< "${words}"
         COMP_WORDS+=("")
+        COMP_LINE="${words} " COMP_POINT=$(( ${#words} + 1 ))
         COMP_CWORD=$(( ${#COMP_WORDS[@]} - 1 ))
         _lsm
     done
@@ -881,6 +1005,7 @@ for name in "${read_only_names[@]}" ; do
         _lsm
         echo "${COMPREPLY[*]}"
         COMP_WORDS=(lsmcli x --ag ag-one --init "") COMP_CWORD=5
+        COMP_LINE="lsmcli x --ag ag-one --init " COMP_POINT=27
         _lsm
         echo "${COMPREPLY[*]}"
         COMP_WORDS=(lsmcli volume-create "--p") COMP_CWORD=2
@@ -890,6 +1015,18 @@ for name in "${read_only_names[@]}" ; do
         fail "completion with readonly ${name}: ${actual}"
     fi
 done
+
+# The whole of it again with set -e on for the completion, and the options that
+# change how patterns match: a completion that stops under set -e, or reads
+# $'\Ay' as a bell, is a bug in the user's shell.
+if [[ -z ${strict} ]] ; then
+    strict_out=$(LSM_TEST_STRICT=1 srcdir="$(dirname "${completion_script}")" bash "${self}" 2>&1)
+    strict_rc=$?
+    if [[ ${strict_rc} -ne 0 ]] ; then
+        fail "under set -e and nocasematch, extglob and nocaseglob (rc ${strict_rc}):"
+        printf '%s\n' "${strict_out}" | tail -n 20
+    fi
+fi
 
 if [[ ${failures} -ne 0 ]] ; then
     echo "${failures} completion test(s) failed"

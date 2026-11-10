@@ -48,16 +48,22 @@ function _lsm_listcontains()
 # it is _lsm that gets it and nothing is left behind in the shell.
 function _lsm_possible_args()
 {
-    local -a _lsm_left=() _lsm_possible=()
+    local -a _lsm_left=() _lsm_possible=() _lsm_words=()
     local _lsm_i
 
+    # The word being completed is not on the line yet: with --ag typed in
+    # full and the cursor after it, --ag is still what is wanted.
+    _lsm_words=("${COMP_WORDS[@]}")
+    [[ -z ${COMP_CWORD-} ]] || unset "_lsm_words[${COMP_CWORD}]"
+
     # read rather than an unquoted expansion, which would glob an entry
-    # containing * or ?.
-    read -r -d '' -a _lsm_possible <<< "$1"
+    # containing * or ?. It fails at the end of its input, which is all of it
+    # here, and that must not stop a shell with set -e.
+    read -r -d '' -a _lsm_possible <<< "$1" || true
     for _lsm_i in ${_lsm_possible[@]+"${_lsm_possible[@]}"}
     do
         if [[ " ${2-} " == *" ${_lsm_i} "* ]] ||
-                ! _lsm_listcontains "COMP_WORDS[@]" "$_lsm_i" ; then
+                ! _lsm_listcontains "_lsm_words[@]" "$_lsm_i" ; then
             _lsm_left+=("$_lsm_i")
         fi
     done
@@ -65,7 +71,9 @@ function _lsm_possible_args()
     _lsm_potential_args=$( _lsm_join ' ' "${_lsm_left[@]}" )
 }
 
-# Look for a word on the command line.
+# Look for the last time a word is on the command line, as that is the one
+# that counts for lsmcli when an option is given twice. The word being
+# completed is not looked at, as it is not there yet.
 # $1 The word to look for
 # $2 Name of the variable to set to the position of the word in COMP_WORDS
 # Returns 0 if found, else 1 and the variable is left alone. The position is
@@ -74,7 +82,8 @@ function _lsm_arg_index()
 {
     local _lsm_i
 
-    for (( _lsm_i = 0; _lsm_i < ${#COMP_WORDS[@]}; _lsm_i++ )) ; do
+    for (( _lsm_i = ${#COMP_WORDS[@]} - 1; _lsm_i >= 0; _lsm_i-- )) ; do
+        [[ ${_lsm_i} == "${COMP_CWORD-}" ]] && continue
         if [[ ${COMP_WORDS[_lsm_i]} == "$1" ]] ; then
             printf -v "$2" '%d' "${_lsm_i}"
             return 0
@@ -161,7 +170,7 @@ function _lsm_ansi_c()
                     if [[ ${_lsm_x} == '?' ]] ; then
                         _lsm_n=127
                     else
-                        (( _lsm_n &= 31 ))
+                        _lsm_n=$(( _lsm_n & 31 ))
                     fi
                     printf -v _lsm_c '%02x' "${_lsm_n}"
                     printf -v _lsm_c "\\x${_lsm_c}"
@@ -326,27 +335,162 @@ function _lsm_escape()
     printf -v "$3" '%s' "${_lsm_v}"
 }
 
+# Find out which words of COMP_WORDS follow the one before them with no white
+# space in between, using COMP_LINE, which is the line as typed. bash breaks
+# words at every character of COMP_WORDBREAKS that is in one, and that
+# includes the = of --uri=sim:// and the : of a URI, so that is the five words
+# --uri = sim : // and the words alone do not say where white space was. What
+# was typed is only trusted if the words are found in COMP_LINE one after the
+# other, else nothing is known about the layout and nothing that needs it is
+# to be relied on.
+# Sets, in the caller, _lsm:
+#   _lsm_glue[i]      1 if word i follows word i-1 with no white space
+#   _lsm_layout_ok    0 if the words could not be matched to COMP_LINE
+# The cursor, COMP_POINT, is what tells if the empty word of an empty
+# position is glued to the word before, as in 'sim:<TAB>'.
+function _lsm_layout()
+{
+    local _lsm_i _lsm_pos=0 _lsm_end=-1 _lsm_start _lsm_w
+    local _lsm_line="${COMP_LINE-}"
+    local _lsm_total=${#_lsm_line}
+
+    _lsm_glue=()
+    _lsm_layout_ok=1
+    for (( _lsm_i = 0; _lsm_i < ${#COMP_WORDS[@]}; _lsm_i++ )) ; do
+        _lsm_w="${COMP_WORDS[_lsm_i]}"
+        _lsm_glue[_lsm_i]=0
+        if [[ -z ${_lsm_w} ]] ; then
+            # Only the word at the cursor can be empty.
+            if [[ ${_lsm_i} != "${COMP_CWORD-}" ]] ; then
+                _lsm_layout_ok=0
+                return 0
+            fi
+            if [[ ${COMP_POINT-} == "${_lsm_end}" ]] ; then
+                _lsm_glue[_lsm_i]=1
+            fi
+            continue
+        fi
+        while (( _lsm_pos < _lsm_total )) && \
+                [[ ${_lsm_line:_lsm_pos:1} == [[:blank:]] ]] ; do
+            (( ++_lsm_pos ))
+        done
+        _lsm_start=${_lsm_pos}
+        if [[ ${_lsm_line:_lsm_start:${#_lsm_w}} != "${_lsm_w}" ]] ; then
+            _lsm_layout_ok=0
+            return 0
+        fi
+        if (( _lsm_i > 0 && _lsm_start == _lsm_end )) ; then
+            _lsm_glue[_lsm_i]=1
+        fi
+        _lsm_pos=$(( _lsm_start + ${#_lsm_w} ))
+        _lsm_end=${_lsm_pos}
+    done
+    return 0
+}
+
+# The word as the shell reads it that starts at a position of COMP_WORDS, which
+# is all the words that follow each other with no white space, so the five
+# words --uri = sim : // are the one word --uri=sim://.
+# $1 Position of the first word
+# $2 Name of the variable to set to the text of the word, as typed
+# $3 Name of the variable to set to the position of its last word
+# Returns 1 if that cannot be told, which is when the layout is not known. The
+# variables it sets are not named _lsm_rk or _lsm_rtext.
+function _lsm_run()
+{
+    local _lsm_rk=$1
+    local _lsm_rtext="${COMP_WORDS[_lsm_rk]}"
+
+    while (( _lsm_rk + 1 < ${#COMP_WORDS[@]} )) && \
+            (( ${_lsm_glue[_lsm_rk+1]:-0} )) ; do
+        (( ++_lsm_rk ))
+        _lsm_rtext+="${COMP_WORDS[_lsm_rk]}"
+    done
+    printf -v "$2" '%s' "${_lsm_rtext}"
+    printf -v "$3" '%d' "${_lsm_rk}"
+    (( _lsm_layout_ok ))
+}
+
 # Get the value that follows a flag on the command line, for use as a filter.
 # $1 The flag, eg. --ag
 # $2 Name of the variable to set to the value, unescaped
 # Returns 0 if the flag is present with a usable value. A missing value, an
 # empty one or one that looks like the next option is treated as if the flag
-# was not there, rather than passing garbage on to lsmcli.
+# was not there, rather than passing garbage on to lsmcli, and that is 1. It
+# is 2 if the flag is there but what its value is cannot be told: the layout
+# of the line is not known, so a value with a : or = in it cannot be put back
+# together, or it is given as --flag=value in one word, or the cursor is in
+# it. The caller is to take it that the filter is not to be left out then.
+# When the flag is given more than once the last one counts.
+# Uses _lsm_glue and _lsm_layout_ok of the caller, _lsm.
 function _lsm_flag_value()
 {
-    local _lsm_index _lsm_value
+    local _lsm_index _lsm_start _lsm_end _lsm_text _lsm_word
 
-    _lsm_arg_index "$1" _lsm_index || return 1
-    (( _lsm_index + 1 < ${#COMP_WORDS[@]} )) || return 1
-    _lsm_value="${COMP_WORDS[_lsm_index+1]}"
-    [[ -n ${_lsm_value} && ${_lsm_value} != -* ]] || return 1
-    _lsm_unescape "${_lsm_value}" "$2"
+    if ! _lsm_arg_index "$1" _lsm_index ; then
+        # Given with a value glued on is not something to look for.
+        for _lsm_word in "${COMP_WORDS[@]}" ; do
+            [[ ${_lsm_word} == "$1="* ]] && return 2
+        done
+        return 1
+    fi
+    (( _lsm_layout_ok )) || return 2
+    _lsm_start=$(( _lsm_index + 1 ))
+    (( _lsm_start < ${#COMP_WORDS[@]} )) || return 1
+    # --flag=value, with the = a word of its own, glued to the flag.
+    if [[ ${COMP_WORDS[_lsm_start]} == '=' ]] && (( _lsm_glue[_lsm_start] )) ; then
+        (( ++_lsm_start ))
+        (( _lsm_start < ${#COMP_WORDS[@]} )) || return 1
+    elif (( _lsm_glue[_lsm_start] )) ; then
+        return 2
+    fi
+    [[ ${_lsm_start} != "${COMP_CWORD-}" ]] || return 1
+    _lsm_run "${_lsm_start}" _lsm_text _lsm_end || return 2
+    # The cursor is in the middle of the value.
+    if (( _lsm_start < ${COMP_CWORD-0} && ${COMP_CWORD-0} <= _lsm_end )) ; then
+        return 2
+    fi
+    [[ -n ${_lsm_text} && ${_lsm_text} != -* ]] || return 1
+    _lsm_unescape "${_lsm_text}" "$2"
+    [[ -n ${!2} ]] || return 1
+    return 0
+}
+
+# Is a word an option of a sub command, or of any sub command if the sub
+# command is not one lsmcli has, which is not for completion to tell.
+# $1 The option
+# $2 The sub command
+# Reads $_lsm_opts_cmds of the caller, _lsm.
+function _lsm_known_option()
+{
+    local _lsm_args _lsm_repeat _lsm_c
+
+    if _lsm_options "$2" ; then
+        [[ " ${_lsm_args} --force " == *" $1 "* ]]
+        return
+    fi
+    for _lsm_c in ${_lsm_opts_cmds} ; do
+        _lsm_options "${_lsm_c}" || continue
+        [[ " ${_lsm_args} --force " == *" $1 "* ]] && return 0
+    done
+    return 1
 }
 
 # Find the sub command, the first word that is not a global option or the
-# value of one, and the URI given with -u or --uri, among the words before the
-# one being completed. The first word, the command itself, is never looked at,
-# which is what lets this work for /usr/bin/lsmcli or ./lsmcli.
+# value of one, and the URI given with -u or --uri. The first word, the command
+# itself, is never looked at, which is what lets this work for
+# /usr/bin/lsmcli or ./lsmcli.
+#
+# The line is read as the shell reads it, as words of text that may be put
+# together from several of COMP_WORDS, see _lsm_layout, and all of it is read,
+# including what is after the cursor, as global options are accepted after
+# the sub command too and -u anywhere on the line is the array the command is
+# for. The last -u counts, as for lsmcli. Wrong is worse than nothing here, as
+# the look-up of values is then for another array, so whenever the URI is not
+# certain, that is if the line has an option that is not known, which could
+# be an abbreviation of --uri, such as --ur, or the layout is not known, the
+# state is bad and no look-up is to be made. Options of the sub command are
+# known ones, and one a later -u follows does not matter.
 #
 # The results are left in the variables of the caller, _lsm, as for
 # _lsm_possible_args:
@@ -356,80 +500,102 @@ function _lsm_flag_value()
 #   _lsm_uri        the URI, unescaped
 #   _lsm_uri_state  none if there is no URI on the line, ok, or bad if there
 #                   is one that cannot be reliably made out
-#
-# bash puts a word break at every character of COMP_WORDBREAKS that is in a
-# word, and that includes the = of --uri=sim:// and the : of a URI, so that
-# is the five words --uri = sim : //. The value of an option is the word that
-# follows, or follows the =, plus every : or = that follows it together with
-# the word after that. The words do not say whether there was white space
-# between them, but COMP_LINE does, so a value made from words that are not
-# in the line as it was typed, eg. 'sim: volume-delete', is not to be trusted.
 function _lsm_scan()
 {
-    local _lsm_i _lsm_k _lsm_w _lsm_raw _lsm_name
+    local _lsm_i _lsm_end _lsm_text _lsm_name _lsm_value _lsm_next _lsm_vend
+    local _lsm_c _lsm_cmd_found=0 _lsm_has_value _lsm_on_cursor
 
     _lsm_cmd=''
     _lsm_in_value=0
     _lsm_uri=''
     _lsm_uri_state=none
+    _lsm_layout
 
-    for (( _lsm_i = 1; _lsm_i < COMP_CWORD; _lsm_i++ )) ; do
-        _lsm_w="${COMP_WORDS[_lsm_i]}"
-        case "${_lsm_w}" in
+    _lsm_i=1
+    while (( _lsm_i < ${#COMP_WORDS[@]} )) ; do
+        _lsm_run "${_lsm_i}" _lsm_text _lsm_end || true
+        _lsm_next=$(( _lsm_end + 1 ))
+        _lsm_has_value=0
+        _lsm_on_cursor=0
+        (( _lsm_i <= COMP_CWORD && COMP_CWORD <= _lsm_end )) && _lsm_on_cursor=1
+
+        case "${_lsm_text}" in
             -u|--uri|-t|--terse|-w|--wait|--fork_plugin)
-                _lsm_name="${_lsm_w}"
-                _lsm_k=$(( _lsm_i + 1 ))
-                # --uri=sim://, with the = a word of its own.
-                if (( _lsm_k < COMP_CWORD )) && [[ ${COMP_WORDS[_lsm_k]} == '=' ]] ; then
-                    (( ++_lsm_k ))
+                # The value is the word after, unless the cursor is on this
+                # and it is the option that is being typed.
+                if (( _lsm_on_cursor )) ; then
+                    _lsm_i=${_lsm_next}
+                    continue
+                fi
+                _lsm_name="${_lsm_text}"
+                _lsm_value=''
+                _lsm_vend=${_lsm_end}
+                if (( _lsm_next >= ${#COMP_WORDS[@]} )) ; then
+                    # No value at all, which lsmcli will not take.
+                    _lsm_has_value=2
+                else
+                    _lsm_has_value=1
+                    _lsm_run "${_lsm_next}" _lsm_value _lsm_vend || true
+                    if (( _lsm_next <= COMP_CWORD && COMP_CWORD <= _lsm_vend )) ; then
+                        _lsm_in_value=1
+                        return 0
+                    fi
                 fi
                 ;;
-            -[utw]?*)
-                # The value is glued on, eg. -usim://
-                _lsm_name="${_lsm_w:0:2}"
-                _lsm_k=${_lsm_i}
+            --uri=*|--terse=*|--wait=*|--fork_plugin=*|-[utw]?*)
+                if (( _lsm_on_cursor )) ; then
+                    _lsm_in_value=1
+                    return 0
+                fi
+                if [[ ${_lsm_text} == --* ]] ; then
+                    _lsm_name="${_lsm_text%%=*}"
+                    _lsm_value="${_lsm_text#*=}"
+                else
+                    _lsm_name="${_lsm_text:0:2}"
+                    _lsm_value="${_lsm_text:2}"
+                fi
+                _lsm_has_value=1
+                _lsm_vend=${_lsm_end}
                 ;;
-            -*) continue ;;
+            # Global options that take no value, and any of the short ones
+            # together, eg. -Hb.
+            -v|--version|-P|--prompt|-H|--human|-e|--enum|-f|--force|-b|-s|\
+            --script|--header|-h|--help|-[vPHefbsh][vPHefbsh]*)
+                ;;
+            -*)
+                # The one being typed is not an option that is on the line
+                # yet, but any other has to be known to be skipped over.
+                if (( ! _lsm_on_cursor )) ; then
+                    _lsm_c="${_lsm_text%%=*}"
+                    if (( ! _lsm_cmd_found )) || \
+                            ! _lsm_known_option "${_lsm_c}" "${_lsm_cmd}" ; then
+                        _lsm_uri_state=bad
+                    fi
+                fi
+                ;;
             *)
-                [[ -n ${_lsm_cmd} ]] || _lsm_cmd="${_lsm_w}"
-                continue
+                if (( ! _lsm_cmd_found && _lsm_end < COMP_CWORD )) ; then
+                    _lsm_cmd="${_lsm_text}"
+                    _lsm_cmd_found=1
+                fi
                 ;;
         esac
 
-        # The word being completed is the value, or part of it.
-        if (( _lsm_k >= COMP_CWORD )) ; then
-            _lsm_in_value=1
-            return 0
-        fi
-
-        _lsm_raw="${COMP_WORDS[_lsm_k]}"
-        if [[ ${_lsm_k} == "${_lsm_i}" ]] ; then
-            _lsm_raw="${_lsm_raw:2}"
-        fi
-        while [[ ${COMP_WORDS[_lsm_k+1]-} == [:=] ]] && (( _lsm_k + 1 <= COMP_CWORD )) ; do
-            _lsm_raw+="${COMP_WORDS[_lsm_k+1]}"
-            (( ++_lsm_k ))
-            # What follows the : is the word being completed, or is that
-            # word itself.
-            if (( _lsm_k + 1 >= COMP_CWORD )) ; then
-                _lsm_in_value=1
-                return 0
+        if (( _lsm_has_value )) ; then
+            if [[ ${_lsm_name} == -u || ${_lsm_name} == --uri ]] ; then
+                _lsm_unescape "${_lsm_value}" _lsm_uri
+                if (( _lsm_has_value == 1 && _lsm_layout_ok )) && [[ -n ${_lsm_uri} ]] ; then
+                    _lsm_uri_state=ok
+                else
+                    _lsm_uri=''
+                    _lsm_uri_state=bad
+                fi
             fi
-            _lsm_raw+="${COMP_WORDS[_lsm_k+1]}"
-            (( ++_lsm_k ))
-        done
-        _lsm_i=${_lsm_k}
-
-        if [[ ${_lsm_name} == -u || ${_lsm_name} == --uri ]] ; then
-            _lsm_unescape "${_lsm_raw}" _lsm_uri
-            if [[ -n ${_lsm_uri} && ( -z ${COMP_LINE-} || ${COMP_LINE} == *"${_lsm_raw}"* ) ]] ; then
-                _lsm_uri_state=ok
-            else
-                _lsm_uri=''
-                _lsm_uri_state=bad
-            fi
+            _lsm_end=${_lsm_vend}
         fi
+        _lsm_i=$(( _lsm_end + 1 ))
     done
+    return 0
 }
 
 # Fill COMPREPLY with the values of the requested column of a 'lsmcli list'.
@@ -578,7 +744,7 @@ function _lsm_options()
     return 0
 }
 
-function _lsm()
+function _lsm_complete()
 {
     local _lsm_cur _lsm_prev _lsm_sep _lsm_potential_args _lsm_opts_short
     local _lsm_opts_long _lsm_opts_cmds _lsm_list_type_args
@@ -586,6 +752,8 @@ function _lsm()
     local _lsm_repeat _lsm_cmd _lsm_in_value _lsm_uri _lsm_uri_state
     local _lsm_rep_types _lsm_range_rep_types _lsm_policies _lsm_write_policies
     local _lsm_raid_types _lsm_provisioning_types _lsm_led_states
+    local -a _lsm_glue
+    local _lsm_layout_ok
 
     # The ASCII unit separator, made for this and not something a name has in
     # it, unlike '#' or ' ', which split a value in two.
@@ -595,11 +763,6 @@ function _lsm()
     (( COMP_CWORD >= 1 )) || return 0
     _lsm_cur="${COMP_WORDS[COMP_CWORD]}"
     _lsm_prev="${COMP_WORDS[COMP_CWORD-1]}"
-
-    # What the sub command is, and the URI, wherever on the line they are.
-    _lsm_scan
-    # The value of a global option, eg. the URI, we know nothing about.
-    (( _lsm_in_value )) && return 0
 
     _lsm_opts_short="-v -u -P -H -t -e -f -w -b -s -h"
     _lsm_opts_long=" --help --version --uri --prompt --human --terse --enum \
@@ -639,6 +802,11 @@ function _lsm()
     _lsm_provisioning_types="DEFAULT THIN FULL"
     _lsm_led_states="IDENT_ON IDENT_OFF FAULT_ON FAULT_OFF"
 
+    # What the sub command is, and the URI, wherever on the line they are.
+    _lsm_scan
+    # The value of a global option, eg. the URI, we know nothing about.
+    (( _lsm_in_value )) && return 0
+
     # These operations can potentially be slow and cause hangs depending on plugin and configuration
     if [[ ${LSMCLI_AUTO_COMPLETE_VALUE:-0} == 1 ]] ; then
 
@@ -666,8 +834,12 @@ function _lsm()
                 ;;
             --init)
                 # We have an access group present on the command line so filter the intiators to it
+                # A filter that is there but cannot be read is not to be left
+                # out, as that would offer the initiators of every group.
                 if _lsm_flag_value "--ag" _lsm_ag_value ; then
                     _lsm_values access_groups 3 --ag "${_lsm_ag_value}"
+                elif (( $? == 2 )) ; then
+                    COMPREPLY=()
                 else
                     _lsm_values access_groups 3
                 fi
@@ -701,7 +873,10 @@ function _lsm()
             --backing-snapshot)
                 # Snapshots of the file system, the one given as --fs for
                 # file-clone and as --src-fs for fs-clone.
-                if _lsm_flag_value "--fs" _lsm_fs_value || \
+                # One that cannot be read is nothing to go by, not the next one.
+                if _lsm_flag_value "--fs" _lsm_fs_value ; then
+                    _lsm_values snapshots 1 --fs "${_lsm_fs_value}"
+                elif (( $? == 1 )) && \
                         _lsm_flag_value "--src-fs" _lsm_fs_value ; then
                     _lsm_values snapshots 1 --fs "${_lsm_fs_value}"
                 else
@@ -799,5 +974,25 @@ function _lsm()
         fi
         return 0
     fi
+    return 0
+}
+
+# What the completion does is not to depend on how the user has set up the
+# shell, and nocasematch would make every case and [[ == ]] here match without
+# regard to case, so it is off while completing, and back after. A completion
+# that is interrupted leaves it off.
+function _lsm()
+{
+    local _lsm_nocase=0 _lsm_rc=0
+
+    if shopt -q nocasematch ; then
+        _lsm_nocase=1
+        shopt -u nocasematch
+    fi
+    _lsm_complete || _lsm_rc=$?
+    if (( _lsm_nocase )) ; then
+        shopt -s nocasematch
+    fi
+    return ${_lsm_rc}
 }
 complete -F _lsm lsmcli
