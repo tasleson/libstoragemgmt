@@ -431,8 +431,10 @@ function _lsm_expands()
 # the shell expands or that is an operator, see _lsm_expands, as an expansion
 # can be more words, including an option, and an operator is a redirection or
 # a command that is not part of this one, and no word starts a comment with
-# a #. The word being completed is only part of a word, so it is not looked
-# at. The layout is still worked out for such a line, for the completion of
+# a #. The word being completed is not looked at when the cursor is at its
+# end, as it is what is typed, and replaced by what is completed, but it is
+# when the cursor is in front of the rest of it, which stays on the line. The
+# layout is still worked out for such a line, for the completion of
 # what is not a value, which only has to do its best.
 # Sets, as variables of the caller, which is _lsm_complete:
 #   _lsm_glue[i]      1 if word i follows word i-1 with no white space
@@ -474,7 +476,8 @@ function _lsm_layout()
         if (( _lsm_i > 0 && _lsm_start == _lsm_end )) ; then
             _lsm_glue[_lsm_i]=1
         fi
-        if [[ ${_lsm_i} != "${COMP_CWORD-}" ]] && \
+        if { [[ ${_lsm_i} != "${COMP_CWORD-}" ]] || \
+             (( ${COMP_POINT-0} < _lsm_start + ${#_lsm_w} )) ; } && \
                 { _lsm_expands "${_lsm_w}" || \
                   [[ ${_lsm_w} == '#'* && ${_lsm_glue[_lsm_i]} == 0 ]] ; } ; then
             _lsm_layout_ok=0

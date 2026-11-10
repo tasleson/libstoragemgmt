@@ -981,6 +981,10 @@ comment_tests=(
     "lsmcli vd --vol # -u sim : //b|3|17|lsmcli vd --vol  # -u sim://b|no"
     "lsmcli # -u sim : //b vd --vol @|8|29|lsmcli # -u sim://b vd --vol |no"
     "lsmcli vd --vol #x|3|16|lsmcli vd --vol #x|no"
+    "lsmcli vd --vol \${O}|3|16|lsmcli vd --vol \${O}|no"
+    "lsmcli vd --vol \${O}|3|18|lsmcli vd --vol \${O}|no"
+    "lsmcli vd --vol \${O}|3|20|lsmcli vd --vol \${O}|yes-end"
+    "lsmcli vd --vol \$P\$Q|3|16|lsmcli vd --vol \$P\$Q|no"
     "lsmcli vd -u sim : //a#b --vol @|7|29|lsmcli vd -u sim://a#b --vol |yes"
 )
 for t in "${comment_tests[@]}" ; do
@@ -991,7 +995,10 @@ for t in "${comment_tests[@]}" ; do
     done
     test_line="${line}"
     test_point="${point}"
-    if [[ ${used} == yes ]] ; then
+    if [[ ${used} == yes-end ]] ; then
+        # At the end of the word it is what is typed, and is replaced.
+        check_words "" "${cword}" "${line_words[@]}"
+    elif [[ ${used} == yes ]] ; then
         check_words "${PAYLOAD_ESC}|vol-one" "${cword}" "${line_words[@]}"
         check_stub_args yes "[-u][sim://a#b]" "${line}"
     else
