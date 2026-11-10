@@ -217,11 +217,10 @@ _DEVEL_ORIG_LSMCLI_URI="${LSMCLI_URI-}"
 _DEVEL_HAD_LSMCLI_AUTO_COMPLETE_VALUE="${LSMCLI_AUTO_COMPLETE_VALUE+yes}"
 _DEVEL_ORIG_LSMCLI_AUTO_COMPLETE_VALUE="${LSMCLI_AUTO_COMPLETE_VALUE-}"
 _DEVEL_ORIG_LSMCLI_COMPLETE="$(complete -p lsmcli 2>/dev/null)"
-# Everything the completion script defines. A completion installed on the
-# system defines the same names, so keep what is there to put it back.
-_DEVEL_LSMCLI_COMPLETION_FUNCS="_lsm _lsm_join _lsm_listcontains \
-    _lsm_possible_args _lsm_arg_index _lsm_unescape _lsm_flag_value \
-    _lsm_values"
+# Everything the completion script defines starts with _lsm. A completion
+# installed on the system defines some of the same names, so keep what is there
+# to put it back.
+_DEVEL_LSMCLI_COMPLETION_FUNCS="$(compgen -A function _lsm)"
 _DEVEL_ORIG_LSMCLI_FUNCS=""
 for _devel_f in $_DEVEL_LSMCLI_COMPLETION_FUNCS; do
     if declare -F "$_devel_f" > /dev/null 2>&1; then
@@ -329,8 +328,10 @@ devel_env_stop() {
     # Drop the completion we sourced, putting back whatever was bound to
     # lsmcli before, eg. an installed completion script.
     complete -r lsmcli 2>/dev/null
-    # shellcheck disable=SC2086
-    unset -f $_DEVEL_LSMCLI_COMPLETION_FUNCS 2>/dev/null
+    # What the script we sourced has defined, which is more than was there to
+    # keep, and then what was there put back below.
+    # shellcheck disable=SC2046
+    unset -f $(compgen -A function _lsm) 2>/dev/null
     # What follows was written by declare -f and complete -p above, so it is
     # safe to evaluate. Functions first, as the completion names one of them.
     if [ -n "${_DEVEL_ORIG_LSMCLI_FUNCS-}" ]; then
