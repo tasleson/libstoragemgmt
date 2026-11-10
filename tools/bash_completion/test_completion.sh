@@ -35,6 +35,7 @@ trap 'rm -rf "${tmp_dir}"' EXIT
 export LSM_TEST_MARKER="${tmp_dir}/payload_ran"
 export LSM_TEST_CALLED="${tmp_dir}/lsmcli_called"
 export LSM_TEST_ARGV="${tmp_dir}/lsmcli_argv"
+export LSM_TEST_PROG="${tmp_dir}/lsmcli_prog"
 
 # The literal string the stub returns as a value.  Single quoted so it stays
 # unevaluated here; if the completion code expands it the marker shows up.
@@ -59,6 +60,8 @@ touch "${LSM_TEST_CALLED}"
 # Noise on stderr, which completion must keep off the user's command line.
 echo "lsmcli stub noise" >&2
 { printf '[%s]' "$@" ; echo ; } >> "${LSM_TEST_ARGV}"
+# How it was run, as ./lsmcli or by what a search of PATH gave.
+echo "$0" >> "${LSM_TEST_PROG}"
 
 list_type=''
 ag=''
@@ -169,7 +172,7 @@ function check_words()
     fi
     COMP_POINT="${test_point-${cursor_at-${#COMP_LINE}}}"
 
-    rm -f "${LSM_TEST_ARGV}"
+    rm -f "${LSM_TEST_ARGV}" "${LSM_TEST_PROG}"
     # Anything written to stderr lands on the user's command line, and it is
     # also where the shell reports a glob that matched nothing under failglob.
     if [[ -n ${strict} ]] ; then
@@ -998,6 +1001,24 @@ for t in "${comment_tests[@]}" ; do
 done
 unset test_line test_point
 
+# The program that is run is the one that was typed, and when that is an alias
+# or a function nothing is run, as what it adds to the line is not known, eg.
+# a -u of its own, and with it the array the line is for.
+check_words "${PAYLOAD_ESC}|vol-one" 3 ./lsmcli vd --vol ""
+[[ $(cat "${LSM_TEST_PROG}") == ./lsmcli ]] || fail "./lsmcli ran $(cat "${LSM_TEST_PROG}")"
+check_words "${PAYLOAD_ESC}|vol-one" 3 lsmcli vd --vol ""
+[[ $(cat "${LSM_TEST_PROG}") == "${tmp_dir}/lsmcli" ]] || fail "lsmcli ran $(cat "${LSM_TEST_PROG}")"
+check_words "" 3 /nonexistent/lsmcli vd --vol ""
+alias lsmcli='lsmcli -u sim://ALIASED'
+check_words "" 3 lsmcli vd --vol ""
+[[ -e ${LSM_TEST_ARGV} ]] && fail "lsmcli is an alias, but lsmcli was run"
+check_words "${PAYLOAD_ESC}|vol-one" 3 ./lsmcli vd --vol ""
+unalias lsmcli
+lsmcli() { echo "a function of the user"; }
+check_words "" 3 lsmcli vd --vol ""
+[[ -e ${LSM_TEST_ARGV} ]] && fail "lsmcli is a function, but lsmcli was run"
+unset -f lsmcli
+
 # What is not a value still completes on a line like that, as well as it can:
 # the sub command is the first word that is not an option, so after a
 # redirection that is the file, but one after the sub command is fine.
@@ -1140,6 +1161,7 @@ unset test_line
 for ag_at in 100 254 255 256 257 260 ; do
     words=()
     for (( n = 0; n < 300; n++ )) ; do words+=("w${n}") ; done
+    words[0]=lsmcli
     words[1]=x
     words[ag_at]="--ag"
     words[ag_at+1]="ag-at-${ag_at}"

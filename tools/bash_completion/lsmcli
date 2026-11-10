@@ -752,7 +752,7 @@ function _lsm_values()
 {
     local _lsm_list_type="$1"
     local _lsm_column="$2"
-    local _lsm_item _lsm_plain _lsm_quote _lsm_skip _lsm_out
+    local _lsm_item _lsm_plain _lsm_quote _lsm_skip _lsm_out _lsm_prog
     local -a _lsm_fields _lsm_items _lsm_uri_args=()
     shift 2
 
@@ -770,10 +770,21 @@ function _lsm_values()
     [[ ${_lsm_uri_state} != bad ]] || return 0
     [[ ${_lsm_uri_state} != ok ]] || _lsm_uri_args=(-u "${_lsm_uri}")
 
+    # The program is the one that was typed, eg. ./lsmcli. An alias or a
+    # function of that name is not run, as it is not known what it adds to
+    # the line, eg. a -u of its own, and so which array the line is for.
+    _lsm_unescape "${COMP_WORDS[0]}" _lsm_prog
+    if [[ ${_lsm_prog} != */* ]] && \
+            { declare -F -- "${_lsm_prog}" || alias -- "${_lsm_prog}" ; } \
+            > /dev/null 2>&1 ; then
+        return 0
+    fi
+
     # Not read from a process substitution, which would not be stopped by
     # Ctrl-C and be left running.
-    _lsm_out=$(lsmcli list --type "${_lsm_list_type}" -t"${_lsm_sep}" \
-        ${_lsm_uri_args[@]+"${_lsm_uri_args[@]}"} "$@" 2>/dev/null) || true
+    _lsm_out=$(command "${_lsm_prog}" list --type "${_lsm_list_type}" \
+        -t"${_lsm_sep}" ${_lsm_uri_args[@]+"${_lsm_uri_args[@]}"} "$@" \
+        2>/dev/null) || true
 
     # ${_lsm_sep} is not white space, so read splits the line on it alone and
     # values keep any spaces they contain. A value with a newline in it would
