@@ -123,7 +123,7 @@ source "${completion_script}"
 failures=0
 
 # Every function the completion script defines, sorted as the C locale does.
-lsm_funcs='_lsm _lsm_ansi_c _lsm_arg_index _lsm_flag_value _lsm_join _lsm_listcontains _lsm_options _lsm_ordinal _lsm_possible_args _lsm_scan _lsm_unescape _lsm_values'
+lsm_funcs='_lsm _lsm_ansi_c _lsm_arg_index _lsm_escape _lsm_flag_value _lsm_join _lsm_listcontains _lsm_options _lsm_ordinal _lsm_possible_args _lsm_scan _lsm_unescape _lsm_values'
 
 function fail()
 {
@@ -246,16 +246,19 @@ done
 
 # Names containing a space, completed from the forms the shell hands over for
 # the word being typed: plain, backslash escaped, and inside either kind of
-# quote. All have to find the name and offer it escaped, space included.
-# The cur column here is exact, with no trimming.
+# quote. All have to find the name and offer it so that the shell reads the
+# word back as the name, space included. That is escaped with a backslash for
+# a word not in quotes, and as is inside quotes, where readline replaces what
+# follows the quote and puts back the closing one. The cur column here is
+# exact, with no trimming.
 #
 # Command line      | word      | expected completions
 space_tests=(
     "lsmcli capabilities --sys|sys|sys-one|sys-two|sys\\ three"
     "lsmcli capabilities --sys|sys\\ |sys\\ three"
     "lsmcli capabilities --sys|sys\\ t|sys\\ three"
-    "lsmcli capabilities --sys|\"sys |sys\\ three"
-    "lsmcli capabilities --sys|'sys |sys\\ three"
+    "lsmcli capabilities --sys|\"sys |sys three"
+    "lsmcli capabilities --sys|'sys |sys three"
     "lsmcli capabilities --sys|\"sys-|sys-one|sys-two"
     "lsmcli capabilities --sys|sys\\ x|"
 )
@@ -288,7 +291,8 @@ function check_stub_args()
 # reads them. Unquoted, a backslash escapes any character; in double quotes
 # only \ " $ and ` and any other backslash stays as typed; in single quotes
 # nothing is escaped. The table is read from a here-document so that nothing
-# in it is processed twice. Names the stub has: back\slash and a"q.
+# in it is processed twice. Names the stub has: back\slash and a"q. Inside
+# quotes what is offered goes in the place of what follows the quote.
 #
 # Command line|word|expected completions
 while IFS='|' read -r comp_line cur expected_head rest ; do
@@ -303,12 +307,12 @@ lsmcli capabilities --sys|back\\\\sl|
 lsmcli capabilities --sys|"back\\sl|back\\slash
 lsmcli capabilities --sys|"back\sl|back\\slash
 lsmcli capabilities --sys|"back\\\\sl|
-lsmcli capabilities --sys|'back\sl|back\\slash
+lsmcli capabilities --sys|'back\sl|back\slash
 lsmcli capabilities --sys|'back\\sl|
 lsmcli capabilities --sys|a\"q|a\"q
 lsmcli capabilities --sys|"a\"q|a\"q
 lsmcli capabilities --sys|"a\"q"|a\"q
-lsmcli capabilities --sys|'a"q|a\"q
+lsmcli capabilities --sys|'a"q|a"q
 lsmcli capabilities --sys|"sys\ |
 lsmcli capabilities --sys|'a'x|ax
 lsmcli capabilities --sys|"a"x|ax
@@ -319,14 +323,65 @@ lsmcli capabilities --sys|"a"\"q|a\"q
 lsmcli capabilities --sys|sys-"o"|sys-one
 lsmcli capabilities --sys|"sys three"|sys\ three
 lsmcli capabilities --sys|'sys th'ree|sys\ three
-lsmcli capabilities --sys|sys\ "th|sys\ three
-lsmcli capabilities --sys|$'t\t|$'t\tb'
-lsmcli capabilities --sys|$'t\x09|$'t\tb'
+lsmcli capabilities --sys|sys\ "th|three
+lsmcli capabilities --sys|sys\ 'th|three
+lsmcli capabilities --sys|'sys'\ th|sys\ three
+lsmcli capabilities --sys|"sys"' th| three
+lsmcli capabilities --sys|sys\ $'th|three
+lsmcli capabilities --sys|$'t\t|t\tb
+lsmcli capabilities --sys|$'t\x09|t\tb
 lsmcli capabilities --sys|$'t\011b'|$'t\tb'
 lsmcli capabilities --sys|$'t\n|
 lsmcli capabilities --sys|t\|$'t\tb'
 lsmcli capabilities --sys|'sys\ |
 lsmcli capabilities --sys|sys\\ |
+TABLE
+
+# What is offered for a word, written for the quote the word has open, reads
+# back as the name. For each quote: the name, and how to read the result back
+# the way the shell does it, and compare, eval'ing only this fixed data.
+# State | before the offered text | after
+for state in none double single ansi ; do
+    case "${state}" in
+        none) before='' ; after='' ;;
+        double) before='"' ; after='"' ;;
+        single) before="'" ; after="'" ;;
+        ansi) before="\$'" ; after="'" ;;
+    esac
+    for name in 'sys three' "it's" 'a"q' '$x' '`x`' 'back\slash' 'a\\b' $'t\tb' \
+                $'n\nl' '*' 'a&b' '!x' '' ; do
+        _lsm_escape "${name}" "${state}" offered
+        eval "read_back=${before}${offered}${after}" 2> /dev/null
+        [[ ${read_back} == "${name}" ]] || \
+            fail "${state} quote: $(printf '%q' "${name}") offered as ${offered}," \
+                 "which reads back as $(printf '%q' "${read_back}")"
+    done
+done
+
+# The quote a word leaves open, and how much of the value came before it.
+# Word | state | characters before
+while IFS='|' read -r word state before ; do
+    _lsm_unescape "${word}" value got_state got_before
+    if [[ ${got_state}/${got_before} != "${state}/${before}" ]] ; then
+        fail "'${word}' ends ${got_state}, ${got_before} before, not ${state}, ${before}"
+    fi
+done <<'TABLE'
+abc|none|0
+a\ b|none|0
+'a b'|none|0
+"a b"|none|0
+$'a b'|none|0
+'a b|single|0
+"a b|double|0
+$'a b|ansi|0
+x'a b|single|1
+sys\ "th|double|4
+sys\ 'th|single|4
+"sys"' th|single|3
+'sys'"th|double|3
+x$'a|ansi|1
+$'a'$'b|ansi|1
+a\"b|none|0
 TABLE
 
 # A filter flag without a usable value is treated as if it was not there:

@@ -205,6 +205,10 @@ function _lsm_ansi_c()
 # $3 Optional name of a variable to set to how the word ends, which is the
 #    quoting that the completion is to be written in: none, single, double
 #    or ansi
+# $4 Optional name of a variable to set to how many characters of the value
+#    were read before the quote that is left open, 0 if none is. Readline
+#    replaces only what follows that quote, and not the whole word, so that
+#    is what the completion has to leave out.
 function _lsm_unescape()
 {
     local _lsm_in="$1"
@@ -212,6 +216,7 @@ function _lsm_unescape()
     local _lsm_state=none
     local _lsm_len=${#_lsm_in}
     local _lsm_c _lsm_next _lsm_i _lsm_j _lsm_piece
+    local _lsm_before=0
 
     for (( _lsm_i = 0; _lsm_i < _lsm_len; _lsm_i++ )) ; do
         _lsm_c="${_lsm_in:_lsm_i:1}"
@@ -223,8 +228,8 @@ function _lsm_unescape()
                     _lsm_out+="${_lsm_next}"
                     (( ++_lsm_i ))
                     ;;
-                "'") _lsm_state=single ;;
-                '"') _lsm_state=double ;;
+                "'") _lsm_state=single ; _lsm_before=${#_lsm_out} ;;
+                '"') _lsm_state=double ; _lsm_before=${#_lsm_out} ;;
                 '$')
                     if [[ ${_lsm_next} == "'" ]] ; then
                         # Find the closing quote before decoding anything.
@@ -236,6 +241,7 @@ function _lsm_unescape()
                         done
                         (( _lsm_j > _lsm_len )) && _lsm_j=${_lsm_len}
                         _lsm_ansi_c "${_lsm_in:_lsm_i+2:_lsm_j-_lsm_i-2}" _lsm_piece
+                        _lsm_before=${#_lsm_out}
                         _lsm_out+="${_lsm_piece}"
                         # Left open, this is the word being completed.
                         (( _lsm_j >= _lsm_len )) && _lsm_state=ansi
@@ -273,6 +279,51 @@ function _lsm_unescape()
     done
     printf -v "$2" '%s' "${_lsm_out}"
     [[ -z ${3-} ]] || printf -v "$3" '%s' "${_lsm_state}"
+    # Only a quote still open counts.
+    [[ ${_lsm_state} != none ]] || _lsm_before=0
+    [[ -z ${4-} ]] || printf -v "$4" '%d' "${_lsm_before}"
+}
+
+# Write a value the way the word being completed has to have it, so that the
+# shell reads that word back as the value. Readline puts what is offered where
+# the typed text was, inside any quote the user opened and without the quote
+# itself, so what is needed depends on the quote:
+#   none    backslash escapes, as printf %q has them
+#   double  a backslash in front of \ " $ and `, and nothing else, as inside
+#           a backslash escapes only those
+#   single  a ' ends the quote, so it is written as '\'' to carry on
+#   ansi    inside $'...', the body of what printf %q writes for a value
+#           with a tab or the like, else \ and ' behind a backslash
+# $1 The value
+# $2 The quoting of the word, as _lsm_unescape gives it
+# $3 Name of the variable to set
+function _lsm_escape()
+{
+    local _lsm_v="$1" _lsm_q
+    local _lsm_bs='\' _lsm_dq='"' _lsm_sq="'" _lsm_bq='`' _lsm_dollar='$'
+
+    case "$2" in
+        double)
+            _lsm_v="${_lsm_v//"${_lsm_bs}"/"${_lsm_bs}${_lsm_bs}"}"
+            _lsm_v="${_lsm_v//"${_lsm_dq}"/"${_lsm_bs}${_lsm_dq}"}"
+            _lsm_v="${_lsm_v//"${_lsm_dollar}"/"${_lsm_bs}${_lsm_dollar}"}"
+            _lsm_v="${_lsm_v//"${_lsm_bq}"/"${_lsm_bs}${_lsm_bq}"}"
+            ;;
+        single)
+            _lsm_v="${_lsm_v//"${_lsm_sq}"/"${_lsm_sq}${_lsm_bs}${_lsm_sq}${_lsm_sq}"}"
+            ;;
+        ansi)
+            printf -v _lsm_q '%q' "${_lsm_v}"
+            if [[ ${_lsm_q} == "${_lsm_dollar}${_lsm_sq}"*"${_lsm_sq}" ]] ; then
+                _lsm_v="${_lsm_q:2:${#_lsm_q}-3}"
+            else
+                _lsm_v="${_lsm_v//"${_lsm_bs}"/"${_lsm_bs}${_lsm_bs}"}"
+                _lsm_v="${_lsm_v//"${_lsm_sq}"/"${_lsm_bs}${_lsm_sq}"}"
+            fi
+            ;;
+        *) printf -v _lsm_v '%q' "${_lsm_v}" ;;
+    esac
+    printf -v "$3" '%s' "${_lsm_v}"
 }
 
 # Get the value that follows a flag on the command line, for use as a filter.
@@ -396,18 +447,22 @@ function _lsm_scan()
 # Note: We cannot use 'compgen -W' here as it expands the word list, which
 # would execute command substitution, eg. $(...), embedded in a name returned
 # by a plugin, so do the prefix matching ourselves instead. As nothing
-# escapes the values for us they are escaped here, so a name with a space in
-# it completes as one word.
+# escapes the values for us they are escaped here, for the quote the word
+# being completed was started with, if any, so a name with a space in it
+# completes as one word and is read back as the name. With a quote open only
+# what follows it is replaced by readline, so the part of the value read
+# before the quote is left out of what is offered.
 function _lsm_values()
 {
     local _lsm_list_type="$1"
     local _lsm_column="$2"
-    local _lsm_item _lsm_plain
+    local _lsm_item _lsm_plain _lsm_quote _lsm_skip
     local -a _lsm_fields _lsm_items _lsm_uri_args=()
     shift 2
 
-    # What was typed so far, minus any escaping or quoting.
-    _lsm_unescape "${_lsm_cur}" _lsm_plain
+    # What was typed so far, minus any escaping or quoting, and which quote
+    # is left open.
+    _lsm_unescape "${_lsm_cur}" _lsm_plain _lsm_quote _lsm_skip
 
     COMPREPLY=()
     [[ ${_lsm_uri_state} == bad ]] && return 0
@@ -426,7 +481,7 @@ function _lsm_values()
         fi
         for _lsm_item in ${_lsm_items[@]+"${_lsm_items[@]}"} ; do
             if [[ -n ${_lsm_item} && ${_lsm_item} == "${_lsm_plain}"* ]] ; then
-                printf -v _lsm_item '%q' "${_lsm_item}"
+                _lsm_escape "${_lsm_item:_lsm_skip}" "${_lsm_quote}" _lsm_item
                 COMPREPLY+=("${_lsm_item}")
             fi
         done
