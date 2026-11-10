@@ -18,7 +18,11 @@
 # alone, as in 'LSMCLI_URI=other lsmcli vd --vol <TAB>': bash 5.3 takes it off
 # COMP_LINE as well as COMP_WORDS, so the look-up is for the array of the
 # shell, not for 'other'. The same for the commands before this one in
-# 'cd /x && lsmcli ...', which are not there either, and are harmless.
+# 'cd /x && lsmcli ...', which are not there either, and are harmless. A
+# wrapper such as 'sudo lsmcli', 'env X=1 lsmcli' or 'nice lsmcli' gets here
+# through bash-completion's _command_offset, and the look-up is then run as the
+# current user with the current environment, not as the wrapped command would
+# be. If lsmcli is an alias or a function there is no look-up.
 #
 # Everything defined here is prefixed with _lsm so sourcing this file does not
 # clobber functions of the user's shell, eg. 'join'. The completion itself is
@@ -781,7 +785,9 @@ function _lsm_values()
     fi
 
     # Not read from a process substitution, which would not be stopped by
-    # Ctrl-C and be left running.
+    # Ctrl-C and be left running. $(...) is not done until what it runs has
+    # closed its output, so a plugin that leaves a child with it open keeps
+    # the completion waiting for that child, even after Ctrl-C.
     _lsm_out=$(command "${_lsm_prog}" list --type "${_lsm_list_type}" \
         -t"${_lsm_sep}" ${_lsm_uri_args[@]+"${_lsm_uri_args[@]}"} "$@" \
         2>/dev/null) || true
