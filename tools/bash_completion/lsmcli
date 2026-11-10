@@ -40,8 +40,10 @@ function _lsm_listcontains()
 }
 
 # Given a list of what is possible and what is on the command line return
-# what is left.
+# what is left. An option that can be given again stays, whatever is on the
+# command line.
 # $1 What is possible
+# $2 What of that can be repeated
 # The result is left in $_lsm_potential_args, which _lsm declares local, so
 # it is _lsm that gets it and nothing is left behind in the shell.
 function _lsm_possible_args()
@@ -54,7 +56,10 @@ function _lsm_possible_args()
     read -r -d '' -a _lsm_possible <<< "$1"
     for _lsm_i in ${_lsm_possible[@]+"${_lsm_possible[@]}"}
     do
-        _lsm_listcontains "COMP_WORDS[@]" "$_lsm_i" || _lsm_left+=("$_lsm_i")
+        if [[ " ${2-} " == *" ${_lsm_i} "* ]] ||
+                ! _lsm_listcontains "COMP_WORDS[@]" "$_lsm_i" ; then
+            _lsm_left+=("$_lsm_i")
+        fi
     done
 
     _lsm_potential_args=$( _lsm_join ' ' "${_lsm_left[@]}" )
@@ -429,30 +434,102 @@ function _lsm_values()
         ${_lsm_uri_args[@]+"${_lsm_uri_args[@]}"} "$@" 2>/dev/null)
 }
 
+# The options of a sub command, or of one of its aliases, that is the ones it
+# requires and the ones it allows, as cmdline.py has them. test_cmdline_drift.sh
+# compares the two, so keep them in step. --force is also offered where it
+# makes sense, though it is a global option.
+# $1 The sub command
+# Sets, in the caller, _lsm and the like:
+#   _lsm_args    The options, in the order to offer them
+#   _lsm_repeat  The ones of those that can be given more than once, which
+#                are still offered after they are used
+# Returns 1 if the sub command is not one lsmcli has.
+function _lsm_options()
+{
+    _lsm_args=''
+    _lsm_repeat=''
+
+    case "$1" in
+        list) _lsm_args="--type ${_lsm_list_filter_args}" ;;
+        # These stand for 'list --type <something>'.
+        ls|lp|lv|ld|la|lf|lt|lb) _lsm_args="${_lsm_list_filter_args}" ;;
+        job-status) _lsm_args="--job" ;;
+        capabilities|c|volume-raid-create-cap|vrcc|\
+        volume-replicate-range-block-size)
+            _lsm_args="--sys"
+            ;;
+        volume-create|vc) _lsm_args="--name --size --pool --provisioning" ;;
+        volume-raid-create|vrc)
+            _lsm_args="--name --disk --raid-type --strip-size"
+            _lsm_repeat="--disk"
+            ;;
+        volume-delete|vd) _lsm_args="--vol --force" ;;
+        volume-resize|vr) _lsm_args="--vol --size --force" ;;
+        volume-replicate) _lsm_args="--vol --name --rep-type --pool" ;;
+        volume-replicate-range)
+            _lsm_args="--src-vol --dst-vol --rep-type --src-start --dst-start \
+--count --force"
+            _lsm_repeat="--src-start --dst-start --count"
+            ;;
+        volume-dependants|volume-dependants-rm|volume-access-group|\
+        volume-enable|volume-disable|ve|vi|volume-raid-info|vri|\
+        volume-cache-info|vci|volume-ident-led-on|vilon|\
+        volume-ident-led-off|viloff)
+            _lsm_args="--vol"
+            ;;
+        volume-mask|volume-unmask|vm|vu) _lsm_args="--vol --ag" ;;
+        volume-phy-disk-cache-update|vpdcu|volume-read-cache-policy-update|\
+        vrcpu|volume-write-cache-policy-update|vwcpu)
+            _lsm_args="--vol --policy"
+            ;;
+        system-read-cache-pct-update|srcpu) _lsm_args="--sys --read-pct" ;;
+        pool-member-info|pmi) _lsm_args="--pool" ;;
+        access-group-create|ac) _lsm_args="--name --init --sys" ;;
+        access-group-add|access-group-remove|aa|ar) _lsm_args="--ag --init" ;;
+        access-group-delete|ad|access-group-volumes) _lsm_args="--ag" ;;
+        iscsi-chap)
+            _lsm_args="--init --in-user --in-pass --out-user --out-pass"
+            ;;
+        fs-create) _lsm_args="--name --size --pool" ;;
+        fs-delete) _lsm_args="--fs --force" ;;
+        fs-resize) _lsm_args="--fs --size --force" ;;
+        fs-export)
+            _lsm_args="--fs --exportpath --anonuid --anongid --auth-type \
+--root-host --ro-host --rw-host"
+            _lsm_repeat="--root-host --ro-host --rw-host"
+            ;;
+        fs-unexport) _lsm_args="--export" ;;
+        fs-clone) _lsm_args="--src-fs --dst-name --backing-snapshot" ;;
+        fs-snap-create) _lsm_args="--name --fs" ;;
+        fs-snap-delete) _lsm_args="--snap --fs" ;;
+        fs-snap-restore)
+            _lsm_args="--snap --fs --file --fileas --force"
+            _lsm_repeat="--file --fileas"
+            ;;
+        fs-dependants|fs-dependants-rm)
+            _lsm_args="--fs --file"
+            _lsm_repeat="--file"
+            ;;
+        file-clone) _lsm_args="--fs --src --dst --backing-snapshot" ;;
+        local-disk-ident-led-on|ldilon|local-disk-ident-led-off|ldiloff|\
+        local-disk-fault-led-on|ldflon|local-disk-fault-led-off|ldfloff)
+            _lsm_args="--path"
+            ;;
+        local-led-slot-set) _lsm_args="--slot --state" ;;
+        # Commands that take nothing.
+        plugin-info|p|local-disk-list|ldl|local-led-slot-list) ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
 function _lsm()
 {
     local _lsm_cur _lsm_prev _lsm_sep _lsm_potential_args _lsm_opts_short
-    local _lsm_opts_long _lsm_opts_cmds _lsm_list_args _lsm_list_type_args
-    local _lsm_cap_args _lsm_ag_value _lsm_fs_value _lsm_volume_create_args
-    local _lsm_volume_delete_args _lsm_volume_resize_args
-    local _lsm_volume_replicate_args _lsm_volume_rep_types
-    local _lsm_volume_replicate_range_args _lsm_volume_replication_range_bs
-    local _lsm_volume_dependants _lsm_volume_access_group_args
-    local _lsm_volume_masking_args _lsm_access_group_create_args
-    local _lsm_access_group_delete_args _lsm_access_group_add_remove_args
-    local _lsm_volume_enable_disable_args _lsm_volume_raidinfo_args
-    local _lsm_iscsi_chap_args _lsm_fs_create_args _lsm_fs_delete_args
-    local _lsm_fs_resize_args _lsm_fs_export_args _lsm_fs_unexport_args
-    local _lsm_fs_clone_args _lsm_fs_snap_create_args _lsm_fs_snap_delete_args
-    local _lsm_fs_snap_restore_args _lsm_fs_dependants_args
-    local _lsm_file_clone_args _lsm_pool_member_info_args
-    local _lsm_volume_raid_create_args _lsm_volume_raid_create_cap_args
-    local _lsm_volume_phy_disk_cache_update_args
-    local _lsm_volume_read_cache_policy_update_args
-    local _lsm_volume_write_cache_policy_update_args
-    local _lsm_volume_cache_info_args _lsm_volume_ident_led_on_off_args
-    local _lsm_system_read_cache_pct_update_args _lsm_local_disk_led_args
-    local _lsm_list_filter_args _lsm_cmd _lsm_in_value _lsm_uri _lsm_uri_state
+    local _lsm_opts_long _lsm_opts_cmds _lsm_list_type_args
+    local _lsm_ag_value _lsm_fs_value _lsm_list_filter_args _lsm_args
+    local _lsm_repeat _lsm_cmd _lsm_in_value _lsm_uri _lsm_uri_state
+    local _lsm_volume_rep_types
 
     # The ASCII unit separator, made for this and not something a name has in
     # it, unlike '#' or ' ', which split a value in two.
@@ -467,88 +544,37 @@ function _lsm()
     _lsm_scan
     # The value of a global option, eg. the URI, we know nothing about.
     (( _lsm_in_value )) && return 0
-    _lsm_opts_short="-b -v -u -P -H -t -e -f -w -s -h"
+
+    _lsm_opts_short="-v -u -P -H -t -e -f -w -b -s -h"
     _lsm_opts_long=" --help --version --uri --prompt --human --terse --enum \
               --force --wait --header --script "
     _lsm_opts_cmds="list job-status capabilities plugin-info volume-create \
-                volume-delete volume-resize volume-replicate \
-                volume-replicate-range volume-replicate-range-block-size \
-                volume-dependants volume-dependants-rm volume-access-group \
-                volume-mask volume-unmask access-group-create \
-                access-group-delete access-group-add access-group-remove \
-                volume-enable volume-disable iscsi-chap fs-create fs-delete \
-                fs-resize fs-export fs-unexport fs-clone fs-snap-create \
-                fs-snap-delete fs-snap-restore fs-dependants fs-dependants-rm \
-                file-clone ls lp lv ld la lf lt lb c p vc vd vr vm vi ve vi ac \
-                aa ar ad vri volume-raid-info pool-member-info pmi \
-                vrc volume-raid-create vrcc volume-raid-create-cap \
-                volume-phy-disk-cache-update vpdcu \
-                volume-read-cache-policy-update vrcpu \
-                volume-write-cache-policy-update vwcpu \
-                volume-cache-info vci volume-ident-led-on vilon \
-                volume-ident-led-off viloff local-disk-list ldl \
-                system-read-cache-pct-update srcpu \
-                local-disk-ident-led-on ldilon \
-                local-disk-ident-led-off ldiloff \
-                local-disk-fault-led-on ldflon \
-                local-disk-fault-led-off ldfloff"
+                volume-raid-create volume-raid-create-cap volume-delete \
+                volume-resize volume-replicate volume-replicate-range \
+                volume-replicate-range-block-size volume-dependants \
+                volume-dependants-rm volume-access-group volume-mask \
+                volume-unmask volume-enable volume-disable volume-raid-info \
+                volume-ident-led-on volume-ident-led-off \
+                system-read-cache-pct-update pool-member-info \
+                access-group-create access-group-add access-group-remove \
+                access-group-delete access-group-volumes iscsi-chap fs-create \
+                fs-delete fs-resize fs-export fs-unexport fs-clone \
+                fs-snap-create fs-snap-delete fs-snap-restore fs-dependants \
+                fs-dependants-rm file-clone local-disk-list \
+                local-led-slot-list volume-cache-info \
+                volume-phy-disk-cache-update volume-read-cache-policy-update \
+                volume-write-cache-policy-update local-disk-ident-led-on \
+                local-disk-ident-led-off local-disk-fault-led-on \
+                local-disk-fault-led-off local-led-slot-set \
+                ls lp lv ld la lf lt lb c p vc vrc vrcc vd vr vm vu ve vi ac \
+                aa ar ad vri vilon viloff srcpu pmi ldl vci vpdcu vrcpu vwcpu \
+                ldilon ldiloff ldflon ldfloff"
 
     _lsm_list_filter_args="--sys --pool --vol --disk --ag --fs --nfs-export --tgt"
-    _lsm_list_args="--type ${_lsm_list_filter_args}"
     _lsm_list_type_args="volumes pools fs snapshots exports nfs_client_auth \
                     access_groups systems disks plugins target_ports \
                     batteries"
-
-    _lsm_cap_args="--sys"
-    _lsm_volume_create_args="--name --size --pool"
-    _lsm_volume_delete_args="--vol --force"  # Should force be here, to easy to tab through?"
-    _lsm_volume_resize_args="--vol --size --force" # Should force be here, to easy to tab through?"
-
-    _lsm_volume_replicate_args="--vol --name --rep-type"
-    # Hmmm, this looks like a bug with CLI, should support lower and upper case?
     _lsm_volume_rep_types="CLONE COPY MIRROR_ASYNC MIRROR_SYNC"
-
-    _lsm_volume_replicate_range_args="--src-vol --dst-vol --rep-type --src-start \
-                                --dst-start --count --force" # Force ?
-
-    _lsm_volume_replication_range_bs="--sys"
-    _lsm_volume_dependants="--vol"
-
-    _lsm_volume_access_group_args="--vol"
-    _lsm_volume_masking_args="--vol --ag"
-
-    _lsm_access_group_create_args="--name --init --sys"
-    _lsm_access_group_delete_args="--ag"
-
-    _lsm_access_group_add_remove_args="--ag --init"
-
-    _lsm_volume_enable_disable_args="--vol"
-
-    _lsm_volume_raidinfo_args="--vol"
-
-    _lsm_iscsi_chap_args="--in-user --in-pass --out-user --out-pass"
-
-    _lsm_fs_create_args="--name --size --pool"
-    _lsm_fs_delete_args="--fs --force" # Force ?
-    _lsm_fs_resize_args="--fs --size --force" # Force ?
-    _lsm_fs_export_args="--fs --exportpath --anonuid --auth-type --root-host --ro-host --rw-host"
-    _lsm_fs_unexport_args="--export"
-    _lsm_fs_clone_args="--src-fs --dst-name"
-    _lsm_fs_snap_create_args="--name --fs"
-    _lsm_fs_snap_delete_args="--snap --fs"
-    _lsm_fs_snap_restore_args="--snap --fs --file --fileas --force"
-    _lsm_fs_dependants_args="--fs"
-    _lsm_file_clone_args="--fs --src --dst --backing-snapshot"
-    _lsm_pool_member_info_args="--pool"
-    _lsm_volume_raid_create_args="--name --disk --raid-type --strip-size"
-    _lsm_volume_raid_create_cap_args="--sys"
-    _lsm_volume_phy_disk_cache_update_args="--vol --policy"
-    _lsm_volume_read_cache_policy_update_args="--vol --policy"
-    _lsm_volume_write_cache_policy_update_args="--vol --policy"
-    _lsm_volume_cache_info_args="--vol"
-    _lsm_volume_ident_led_on_off_args="--vol"
-    _lsm_system_read_cache_pct_update_args="--vol --read-pct"
-    _lsm_local_disk_led_args="--path"
 
     # These operations can potentially be slow and cause hangs depending on plugin and configuration
     if [[ ${LSMCLI_AUTO_COMPLETE_VALUE:-0} == 1 ]] ; then
@@ -647,214 +673,12 @@ function _lsm()
         return 0
     fi
 
-    case "${_lsm_cmd}" in
-        job-status)
-            _lsm_possible_args "--job"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        list)
-            _lsm_possible_args "${_lsm_list_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        ls|lp|lv|ld|la|lf|lt|lb)
-            # These stand for 'list --type <something>'.
-            _lsm_possible_args "${_lsm_list_filter_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        volume-create|vc)
-            _lsm_possible_args "${_lsm_volume_create_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        volume-delete|vd)
-            _lsm_possible_args "${_lsm_volume_delete_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        volume-raid-info|vri)
-            _lsm_possible_args "${_lsm_volume_raidinfo_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        volume-resize|vr)
-            _lsm_possible_args "${_lsm_volume_resize_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        volume-replicate)
-            _lsm_possible_args "${_lsm_volume_replicate_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        volume-replicate-range)
-            _lsm_possible_args "${_lsm_volume_replicate_range_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        volume-replicate-range-block-size)
-            _lsm_possible_args "${_lsm_volume_replication_range_bs}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        volume-dependants|volume-dependants-rm)
-            _lsm_possible_args "${_lsm_volume_dependants}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        volume-access-group)
-            _lsm_possible_args "${_lsm_volume_access_group_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        volume-mask|volume-unmask|vm|vu)
-            _lsm_possible_args "${_lsm_volume_masking_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        access-group-create|ac)
-            _lsm_possible_args "${_lsm_access_group_create_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        access-group-delete|ad)
-            _lsm_possible_args "${_lsm_access_group_delete_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        access-group-add|access-group-remove|aa|ar)
-            _lsm_possible_args "${_lsm_access_group_add_remove_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        volume-enable|volume-disable|ve|vi)
-            _lsm_possible_args "${_lsm_volume_enable_disable_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        iscsi-chap)
-            _lsm_possible_args "${_lsm_iscsi_chap_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        fs-create)
-            _lsm_possible_args "${_lsm_fs_create_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        fs-delete)
-            _lsm_possible_args "${_lsm_fs_delete_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        fs-resize)
-            _lsm_possible_args "${_lsm_fs_resize_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        fs-export)
-            _lsm_possible_args "${_lsm_fs_export_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        fs-unexport)
-            _lsm_possible_args "${_lsm_fs_unexport_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        fs-clone)
-            _lsm_possible_args "${_lsm_fs_clone_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        fs-snap-create)
-            _lsm_possible_args "${_lsm_fs_snap_create_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        fs-snap-delete)
-            _lsm_possible_args "${_lsm_fs_snap_delete_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        fs-snap-restore)
-            _lsm_possible_args "${_lsm_fs_snap_restore_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        fs-dependants|fs-dependants-rm)
-            _lsm_possible_args "${_lsm_fs_dependants_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        file-clone)
-            _lsm_possible_args "${_lsm_file_clone_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        capabilities|c)
-            _lsm_possible_args "${_lsm_cap_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        pool-member-info|pmi)
-            _lsm_possible_args "${_lsm_pool_member_info_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        volume-raid-create|vrc)
-            _lsm_possible_args "${_lsm_volume_raid_create_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        volume-raid-create-cap|vrcc)
-            _lsm_possible_args "${_lsm_volume_raid_create_cap_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        volume-phy-disk-cache-update|vpdcu)
-            _lsm_possible_args "${_lsm_volume_phy_disk_cache_update_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        volume-read-cache-policy-update|vrcpu)
-            _lsm_possible_args "${_lsm_volume_read_cache_policy_update_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        volume-write-cache-policy-update|vwcpu)
-            _lsm_possible_args "${_lsm_volume_write_cache_policy_update_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        volume-cache-info|vci)
-            _lsm_possible_args "${_lsm_volume_cache_info_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        volume-ident-led-on|volume-ident-led-off|vilon|viloff)
-            _lsm_possible_args "${_lsm_volume_ident_led_on_off_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        system-read-cache-pct-update|srcpu)
-            _lsm_possible_args "${_lsm_system_read_cache_pct_update_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        local-disk-ident-led-on|ldilon| \
-        local-disk-ident-led-off|ldiloff| \
-        local-disk-fault-led-on|ldflon| \
-        local-disk-fault-led-off|ldfloff)
-            _lsm_possible_args "${_lsm_local_disk_led_args}"
-            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
-            return 0
-            ;;
-        *)
-        ;;
-    esac
+    # Whatever the sub command allows that is not on the line already.
+    if _lsm_options "${_lsm_cmd}" ; then
+        _lsm_possible_args "${_lsm_args}" "${_lsm_repeat}"
+        COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
+        return 0
+    fi
 
     # No sub command yet, so offer global options and the commands. Always,
     # as the words typed before can be any global options, and with a value

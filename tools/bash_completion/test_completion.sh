@@ -123,7 +123,7 @@ source "${completion_script}"
 failures=0
 
 # Every function the completion script defines, sorted as the C locale does.
-lsm_funcs='_lsm _lsm_ansi_c _lsm_arg_index _lsm_flag_value _lsm_join _lsm_listcontains _lsm_ordinal _lsm_possible_args _lsm_scan _lsm_unescape _lsm_values'
+lsm_funcs='_lsm _lsm_ansi_c _lsm_arg_index _lsm_flag_value _lsm_join _lsm_listcontains _lsm_options _lsm_ordinal _lsm_possible_args _lsm_scan _lsm_unescape _lsm_values'
 
 function fail()
 {
@@ -367,7 +367,7 @@ check_stub_args yes "[--fs][fs one]" "escaped --fs"
 #
 # Command line                      | word     | expected completions
 cmd_tests=(
-    "lsmcli -b volume-create|--|--name|--size|--pool"
+    "lsmcli -b volume-create|--|--name|--size|--pool|--provisioning"
     "lsmcli -H -b -s volume-create|--n|--name"
     "lsmcli -u sim : // volume-delete||--vol|--force"
     "lsmcli -u sim : //x : 80/y volume-delete||--vol|--force"
@@ -425,6 +425,79 @@ for t in "${cmd_tests[@]}" ; do
     [[ -n ${rest} ]] && expected="${expected_head}|${rest}"
     check "${comp_line}" "${cur}" "${expected}"
 done
+# Every sub command, and alias, with what it offers when nothing is on the line
+# but the command. These are what cmdline.py has, and test_cmdline_drift.sh
+# checks they still are. The commands taking --force have it offered too.
+#
+# Commands (the first of them the one tested, the rest aliases) | options
+option_tests=(
+    "list|--type --sys --pool --vol --disk --ag --fs --nfs-export --tgt"
+    "ls lp lv ld la lf lt lb|--sys --pool --vol --disk --ag --fs --nfs-export --tgt"
+    "job-status|--job"
+    "capabilities c volume-raid-create-cap vrcc volume-replicate-range-block-size|--sys"
+    "plugin-info p local-disk-list ldl local-led-slot-list|"
+    "volume-create vc|--name --size --pool --provisioning"
+    "volume-raid-create vrc|--name --disk --raid-type --strip-size"
+    "volume-delete vd|--vol --force"
+    "volume-resize vr|--vol --size --force"
+    "volume-replicate|--vol --name --rep-type --pool"
+    "volume-replicate-range|--src-vol --dst-vol --rep-type --src-start --dst-start --count --force"
+    "volume-dependants volume-dependants-rm volume-access-group volume-enable volume-disable ve vi volume-raid-info vri volume-cache-info vci volume-ident-led-on vilon volume-ident-led-off viloff|--vol"
+    "volume-mask volume-unmask vm vu|--vol --ag"
+    "volume-phy-disk-cache-update vpdcu volume-read-cache-policy-update vrcpu volume-write-cache-policy-update vwcpu|--vol --policy"
+    "system-read-cache-pct-update srcpu|--sys --read-pct"
+    "pool-member-info pmi|--pool"
+    "access-group-create ac|--name --init --sys"
+    "access-group-add access-group-remove aa ar|--ag --init"
+    "access-group-delete ad access-group-volumes|--ag"
+    "iscsi-chap|--init --in-user --in-pass --out-user --out-pass"
+    "fs-create|--name --size --pool"
+    "fs-delete|--fs --force"
+    "fs-resize|--fs --size --force"
+    "fs-export|--fs --exportpath --anonuid --anongid --auth-type --root-host --ro-host --rw-host"
+    "fs-unexport|--export"
+    "fs-clone|--src-fs --dst-name --backing-snapshot"
+    "fs-snap-create|--name --fs"
+    "fs-snap-delete|--snap --fs"
+    "fs-snap-restore|--snap --fs --file --fileas --force"
+    "fs-dependants fs-dependants-rm|--fs --file"
+    "file-clone|--fs --src --dst --backing-snapshot"
+    "local-disk-ident-led-on ldilon local-disk-ident-led-off ldiloff local-disk-fault-led-on ldflon local-disk-fault-led-off ldfloff|--path"
+    "local-led-slot-set|--slot --state"
+)
+for t in "${option_tests[@]}" ; do
+    IFS='|' read -r option_cmds option_list <<< "${t}"
+    expected="${option_list// /|}"
+    for option_cmd in ${option_cmds} ; do
+        check_end "${expected}" lsmcli "${option_cmd}" ""
+    done
+done
+
+# Options that can be repeated stay on offer after they are used, the others,
+# even ones that are repeatable for some other command, do not.
+#
+# Command line | word | expected completions
+repeat_tests=(
+    "lsmcli volume-raid-create --name x --disk d1 --disk d2||--disk|--raid-type|--strip-size"
+    "lsmcli vrc --disk d1 --raid-type RAID5 --strip-size 8||--name|--disk"
+    "lsmcli volume-replicate-range --src-vol a --dst-vol b --rep-type COPY --src-start 1 --dst-start 2 --count 3||--src-start|--dst-start|--count|--force"
+    "lsmcli fs-export --fs f --root-host a --ro-host b --rw-host c --exportpath /x||--anonuid|--anongid|--auth-type|--root-host|--ro-host|--rw-host"
+    "lsmcli fs-snap-restore --snap s --fs f --file a --fileas b||--file|--fileas|--force"
+    "lsmcli fs-dependants --fs f --file a||--file"
+    "lsmcli fs-dependants-rm --fs f --file a --file b||--file"
+    "lsmcli list --disk d --sys s||--type|--pool|--vol|--ag|--fs|--nfs-export|--tgt"
+    "lsmcli lv --disk d||--sys|--pool|--vol|--ag|--fs|--nfs-export|--tgt"
+    "lsmcli volume-create --name a --name b||--size|--pool|--provisioning"
+    "lsmcli fs-snap-restore --snap s --fs f --file a --force||--file|--fileas"
+    "lsmcli fs-export --fs f --root-host a|--r|--root-host|--ro-host|--rw-host"
+)
+for t in "${repeat_tests[@]}" ; do
+    IFS='|' read -r comp_line cur expected_head rest <<< "${t}"
+    expected="${expected_head}"
+    [[ -n ${rest} ]] && expected="${expected_head}|${rest}"
+    check "${comp_line}" "${cur}" "${expected}"
+done
+
 # The first word, and the last of a line that is all there is.
 check_words "" 0 lsmcli
 check_words "" 0 ""
@@ -674,7 +747,7 @@ for name in "${declared[@]}" ; do
 done
 
 # Each completes a value look-up, the --ag filter and the plain argument list.
-expected_readonly=$'sys-one\ninit-filtered\n--pool'
+expected_readonly=$'sys-one\ninit-filtered\n--pool --provisioning'
 for name in "${read_only_names[@]}" ; do
     actual=$(env LSMCLI_AUTO_COMPLETE_VALUE=1 bash --noprofile --norc -c '
         readonly "$2"
