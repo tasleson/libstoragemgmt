@@ -140,6 +140,8 @@ function complete_for()
     read -r -a words <<< "$1"
     COMP_WORDS=("${words[@]}" "$2")
     COMP_CWORD=${#words[@]}
+    COMP_LINE="$1 $2"
+    COMP_POINT=${#COMP_LINE}
     COMPREPLY=()
     _lsm
 }
@@ -317,8 +319,9 @@ if [[ ${#COMPREPLY[@]} -ne 0 ]] ; then
     fail "--backing-snapshot without a file system offered: ${COMPREPLY[*]}"
 fi
 
-# A -u on the command line is passed on to the look-up, and the real lsmcli
-# takes it alongside the wrapper's own.
+# That the real lsmcli takes the -u that is passed on with a look-up and still
+# lists. It does not show that the URI is passed, as the simulator takes any
+# URI, so test_completion.sh checks that with its stub.
 complete_for "lsmcli -u sim:// volume-delete --vol" ""
 if ! reply_contains "${vol_id}" ; then
     fail "--vol with -u sim:// : '${vol_id}' missing from: ${COMPREPLY[*]}"
