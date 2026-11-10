@@ -51,10 +51,12 @@ fs-delete fs-resize fs-snap-restore "
 #   repeat <command> <option>
 #   choices <command> <option> <choice>...
 #   global <option>...
+#   error <what could not be read>
 # Read the syntax trees of cmdline.py and of data_display.py, for the RAID
 # types in it, evaluating no more than names, constants, lists, tuples and
-# dict() calls, and what is not understood is left out of the result, which
-# the comparison then reports as a difference.
+# dict() calls, and what is not understood is an 'error' line, which fails
+# the test naming the command and option, rather than being compared as if
+# it was not there.
 facts=$(python3 -I - "${cmdline_py}" "${data_display_py}" <<'PYEOF'
 import ast
 import sys
@@ -149,18 +151,60 @@ def main():
 
     # argparse adds -h and --help itself.
     print('global', '-h', '--help', *common_options(cmdline))
-    for cmd in env['cmds']:
-        options = (cmd.get('args') or []) + (cmd.get('optional') or [])
-        print('command', cmd['name'], *[opt['name'] for opt in options])
+    cmds = env.get('cmds', UNKNOWN)
+    if not isinstance(cmds, list):
+        print('error cmds cannot be read')
+        cmds = []
+    for cmd in cmds:
+        if not isinstance(cmd, dict) or not isinstance(cmd.get('name'), str):
+            print('error a command in cmds cannot be read')
+            continue
+        name = cmd['name']
+        options = []
+        for kind in ('args', 'optional'):
+            found = cmd.get(kind, [])
+            if not isinstance(found, list):
+                print('error %s of %s cannot be read' % (kind, name))
+                continue
+            options.extend(found)
+        names = []
         for opt in options:
-            if opt.get('action') == 'append':
-                print('repeat', cmd['name'], opt['name'])
+            if not isinstance(opt, dict) or not isinstance(opt.get('name'), str):
+                print('error an option of %s cannot be read' % name)
+                continue
+            names.append(opt['name'])
+        print('command', name, *names)
+        for opt in options:
+            if not isinstance(opt, dict) or not isinstance(opt.get('name'), str):
+                continue
+            where = '%s %s' % (name, opt['name'])
+            if 'action' in opt:
+                if not isinstance(opt['action'], str):
+                    print('error action of %s cannot be read' % where)
+                elif opt['action'] == 'append':
+                    print('repeat', name, opt['name'])
             choices = opt.get('choices')
             if opt['name'] == '--state':
+                # Its choices are the keys of a dict in the type function.
                 choices = led_states(cmdline)
-            if isinstance(choices, (list, tuple)):
-                print('choices', cmd['name'], opt['name'], *choices)
-    for name, target in env['aliases'].items():
+                if choices is None:
+                    print('error choices of %s cannot be read' % where)
+                    continue
+            elif 'choices' not in opt:
+                continue
+            if (not isinstance(choices, list)
+                    or not all(isinstance(c, str) for c in choices)):
+                print('error choices of %s cannot be read' % where)
+                continue
+            print('choices', name, opt['name'], *choices)
+    aliases = env.get('aliases', UNKNOWN)
+    if not isinstance(aliases, dict):
+        print('error aliases cannot be read')
+        aliases = {}
+    for name, target in aliases.items():
+        if not isinstance(target, str):
+            print('error alias %s cannot be read' % name)
+            continue
         print('alias', name, target)
 
 
@@ -221,6 +265,7 @@ while read -r kind name rest ; do
         repeat) cmd_repeat[${name}]+=" ${rest}" ;;
         choices) cmd_choices["${name} ${rest%% *}"]="${rest#* }" ;;
         alias) alias_target[${name}]="${rest}" ;;
+        error) fail "cmdline.py: ${name} ${rest}" ;;
     esac
 done <<< "${facts}"
 
@@ -273,7 +318,8 @@ for name in "${!names_to_check[@]}" ; do
     for option in ${options} ; do
         again=no
         [[ " ${cmd_repeat[${command}]-} " == *" ${option} "* ]] && again=yes
-        if [[ $(offered lsmcli "${name}" "${option}" x "") == *"${option} "* ]] ; then
+        # A whole word, --vol is not in --src-vol.
+        if [[ " $(offered lsmcli "${name}" "${option}" x "")" == *" ${option} "* ]] ; then
             [[ ${again} == yes ]] || fail "${name} offers ${option} again, it cannot be repeated"
         else
             [[ ${again} == no ]] || fail "${name} does not offer ${option} again, it can be repeated"
