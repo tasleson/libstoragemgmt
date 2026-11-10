@@ -287,12 +287,106 @@ function _lsm_flag_value()
     _lsm_unescape "${_lsm_value}" "$2"
 }
 
+# Find the sub command, the first word that is not a global option or the
+# value of one, and the URI given with -u or --uri, among the words before the
+# one being completed. The first word, the command itself, is never looked at,
+# which is what lets this work for /usr/bin/lsmcli or ./lsmcli.
+#
+# The results are left in the variables of the caller, _lsm, as for
+# _lsm_possible_args:
+#   _lsm_cmd        the sub command, empty if there is none yet
+#   _lsm_in_value   1 if the word being completed is part of the value of a
+#                   global option, for which there is nothing to offer
+#   _lsm_uri        the URI, unescaped
+#   _lsm_uri_state  none if there is no URI on the line, ok, or bad if there
+#                   is one that cannot be reliably made out
+#
+# bash puts a word break at every character of COMP_WORDBREAKS that is in a
+# word, and that includes the = of --uri=sim:// and the : of a URI, so that
+# is the five words --uri = sim : //. The value of an option is the word that
+# follows, or follows the =, plus every : or = that follows it together with
+# the word after that. The words do not say whether there was white space
+# between them, but COMP_LINE does, so a value made from words that are not
+# in the line as it was typed, eg. 'sim: volume-delete', is not to be trusted.
+function _lsm_scan()
+{
+    local _lsm_i _lsm_k _lsm_w _lsm_raw _lsm_name
+
+    _lsm_cmd=''
+    _lsm_in_value=0
+    _lsm_uri=''
+    _lsm_uri_state=none
+
+    for (( _lsm_i = 1; _lsm_i < COMP_CWORD; _lsm_i++ )) ; do
+        _lsm_w="${COMP_WORDS[_lsm_i]}"
+        case "${_lsm_w}" in
+            -u|--uri|-t|--terse|-w|--wait|--fork_plugin)
+                _lsm_name="${_lsm_w}"
+                _lsm_k=$(( _lsm_i + 1 ))
+                # --uri=sim://, with the = a word of its own.
+                if (( _lsm_k < COMP_CWORD )) && [[ ${COMP_WORDS[_lsm_k]} == '=' ]] ; then
+                    (( ++_lsm_k ))
+                fi
+                ;;
+            -[utw]?*)
+                # The value is glued on, eg. -usim://
+                _lsm_name="${_lsm_w:0:2}"
+                _lsm_k=${_lsm_i}
+                ;;
+            -*) continue ;;
+            *)
+                [[ -n ${_lsm_cmd} ]] || _lsm_cmd="${_lsm_w}"
+                continue
+                ;;
+        esac
+
+        # The word being completed is the value, or part of it.
+        if (( _lsm_k >= COMP_CWORD )) ; then
+            _lsm_in_value=1
+            return 0
+        fi
+
+        _lsm_raw="${COMP_WORDS[_lsm_k]}"
+        if [[ ${_lsm_k} == "${_lsm_i}" ]] ; then
+            _lsm_raw="${_lsm_raw:2}"
+        fi
+        while [[ ${COMP_WORDS[_lsm_k+1]-} == [:=] ]] && (( _lsm_k + 1 <= COMP_CWORD )) ; do
+            _lsm_raw+="${COMP_WORDS[_lsm_k+1]}"
+            (( ++_lsm_k ))
+            # What follows the : is the word being completed, or is that
+            # word itself.
+            if (( _lsm_k + 1 >= COMP_CWORD )) ; then
+                _lsm_in_value=1
+                return 0
+            fi
+            _lsm_raw+="${COMP_WORDS[_lsm_k+1]}"
+            (( ++_lsm_k ))
+        done
+        _lsm_i=${_lsm_k}
+
+        if [[ ${_lsm_name} == -u || ${_lsm_name} == --uri ]] ; then
+            _lsm_unescape "${_lsm_raw}" _lsm_uri
+            if [[ -n ${_lsm_uri} && ( -z ${COMP_LINE-} || ${COMP_LINE} == *"${_lsm_raw}"* ) ]] ; then
+                _lsm_uri_state=ok
+            else
+                _lsm_uri=''
+                _lsm_uri_state=bad
+            fi
+        fi
+    done
+}
+
 # Fill COMPREPLY with the values of the requested column of a 'lsmcli list'.
 # $1 Value for --type
 # $2 Column number to use as the completion value, or 'all' to use every
 #    field of every line, for nfs_client_auth which prints one line of values
 # $@ Any remaining arguments are passed to lsmcli as-is
-# Reads $_lsm_cur and $_lsm_sep of the caller, _lsm.
+# Reads $_lsm_cur, $_lsm_sep, $_lsm_uri and $_lsm_uri_state of the caller, _lsm.
+#
+# The URI given on the command line, if any, is passed on, so the values are
+# those of the array the command is for rather than of the default one. When
+# the URI cannot be made out there is nothing to offer, as guessing could
+# list the wrong array. -P is never passed, as it would prompt for a password.
 #
 # Note: We cannot use 'compgen -W' here as it expands the word list, which
 # would execute command substitution, eg. $(...), embedded in a name returned
@@ -304,13 +398,16 @@ function _lsm_values()
     local _lsm_list_type="$1"
     local _lsm_column="$2"
     local _lsm_item _lsm_plain
-    local -a _lsm_fields _lsm_items
+    local -a _lsm_fields _lsm_items _lsm_uri_args=()
     shift 2
 
     # What was typed so far, minus any escaping or quoting.
     _lsm_unescape "${_lsm_cur}" _lsm_plain
 
     COMPREPLY=()
+    [[ ${_lsm_uri_state} == bad ]] && return 0
+    [[ ${_lsm_uri_state} == ok ]] && _lsm_uri_args=(-u "${_lsm_uri}")
+
     # ${_lsm_sep} is not white space, so read splits the line on it alone and
     # values keep any spaces they contain. A value with a newline in it would
     # be split in two records, as the output is read a line at a time, but
@@ -328,7 +425,8 @@ function _lsm_values()
                 COMPREPLY+=("${_lsm_item}")
             fi
         done
-    done < <(lsmcli list --type "${_lsm_list_type}" -t"${_lsm_sep}" "$@" 2>/dev/null)
+    done < <(lsmcli list --type "${_lsm_list_type}" -t"${_lsm_sep}" \
+        ${_lsm_uri_args[@]+"${_lsm_uri_args[@]}"} "$@" 2>/dev/null)
 }
 
 function _lsm()
@@ -354,14 +452,22 @@ function _lsm()
     local _lsm_volume_write_cache_policy_update_args
     local _lsm_volume_cache_info_args _lsm_volume_ident_led_on_off_args
     local _lsm_system_read_cache_pct_update_args _lsm_local_disk_led_args
+    local _lsm_list_filter_args _lsm_cmd _lsm_in_value _lsm_uri _lsm_uri_state
 
     # The ASCII unit separator, made for this and not something a name has in
     # it, unlike '#' or ' ', which split a value in two.
     _lsm_sep=$'\x1f'
     COMPREPLY=()
+    # There is no previous word for the command itself, and nothing to offer.
+    (( COMP_CWORD >= 1 )) || return 0
     _lsm_cur="${COMP_WORDS[COMP_CWORD]}"
     _lsm_prev="${COMP_WORDS[COMP_CWORD-1]}"
-    _lsm_opts_short="-b -v -u -P -H -t -e -f -w -b"
+
+    # What the sub command is, and the URI, wherever on the line they are.
+    _lsm_scan
+    # The value of a global option, eg. the URI, we know nothing about.
+    (( _lsm_in_value )) && return 0
+    _lsm_opts_short="-b -v -u -P -H -t -e -f -w -s -h"
     _lsm_opts_long=" --help --version --uri --prompt --human --terse --enum \
               --force --wait --header --script "
     _lsm_opts_cmds="list job-status capabilities plugin-info volume-create \
@@ -387,7 +493,8 @@ function _lsm()
                 local-disk-fault-led-on ldflon \
                 local-disk-fault-led-off ldfloff"
 
-    _lsm_list_args="--type"
+    _lsm_list_filter_args="--sys --pool --vol --disk --ag --fs --nfs-export --tgt"
+    _lsm_list_args="--type ${_lsm_list_filter_args}"
     _lsm_list_type_args="volumes pools fs snapshots exports nfs_client_auth \
                     access_groups systems disks plugins target_ports \
                     batteries"
@@ -519,7 +626,7 @@ function _lsm()
             ;;
         --size|--count|--src-start|--dst-start|--name|--in-user|--in-pass|\
             --out-user|--out-pass|--exportpath|--anonuid|--root-host|--ro-host|\
-            --rw-host|--dest-name|--file|--fileas|--src|--dst)
+            --rw-host|--dst-name|--file|--fileas|--src|--dst)
             # These we cannot lookup, so don't offer any values
             COMPREPLY=( $(compgen -W "" -- "${_lsm_cur}") )
             return 0
@@ -528,25 +635,32 @@ function _lsm()
             COMPREPLY=( $(compgen -W "${_lsm_volume_rep_types}" -- "${_lsm_cur}") )
             return 0
             ;;
-        snapshots)
-            # Specific listing case where you need a fs too
-            if [[ ${COMP_WORDS[COMP_CWORD-2]} == '--type' && \
-                  ${COMP_WORDS[COMP_CWORD-3]} == 'list' ]] ; then
-                COMPREPLY=( $(compgen -W "--fs" -- "${_lsm_cur}") )
-                return 0
-            fi
-            ;;
         *)
     esac
 
-    case "${COMP_WORDS[1]}" in
+    # Specific listing case where you need a fs too. --type takes the name in
+    # either case, and the sub command is the one found, not a fixed position.
+    if (( COMP_CWORD >= 2 )) && [[ ${_lsm_prev,,} == snapshots && \
+            ${COMP_WORDS[COMP_CWORD-2]} == '--type' && \
+            ${_lsm_cmd} == list ]] ; then
+        COMPREPLY=( $(compgen -W "--fs" -- "${_lsm_cur}") )
+        return 0
+    fi
+
+    case "${_lsm_cmd}" in
         job-status)
             _lsm_possible_args "--job"
             COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
             return 0
             ;;
         list)
-            _lsm_possible_args ${_lsm_list_args}
+            _lsm_possible_args "${_lsm_list_args}"
+            COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
+            return 0
+            ;;
+        ls|lp|lv|ld|la|lf|lt|lb)
+            # These stand for 'list --type <something>'.
+            _lsm_possible_args "${_lsm_list_filter_args}"
             COMPREPLY=( $(compgen -W "${_lsm_potential_args}" -- "${_lsm_cur}") )
             return 0
             ;;
@@ -742,22 +856,18 @@ function _lsm()
         ;;
     esac
 
-    # Handle the case where we are starting out with nothing
-    if [[ ${_lsm_prev} == 'lsmcli' ]] ; then
+    # No sub command yet, so offer global options and the commands. Always,
+    # as the words typed before can be any global options, and with a value
+    # or without.
+    if [[ -z ${_lsm_cmd} ]] ; then
         if [[ ${_lsm_cur} == --* ]] ; then
             COMPREPLY=( $(compgen -W "${_lsm_opts_long}"  -- "${_lsm_cur}") )
-            return 0
-        fi
-
-        if [[ ${_lsm_cur} == -* ]] ; then
+        elif [[ ${_lsm_cur} == -* ]] ; then
             COMPREPLY=( $(compgen -W "${_lsm_opts_short}${_lsm_opts_long}"  -- "${_lsm_cur}") )
-            return 0
-        fi
-
-        if [[ ${_lsm_cur} == * ]] ; then
+        else
             COMPREPLY=( $(compgen -W "${_lsm_opts_short}${_lsm_opts_long}${_lsm_opts_cmds}"  -- "${_lsm_cur}") )
-            return 0
         fi
+        return 0
     fi
 }
 complete -F _lsm lsmcli

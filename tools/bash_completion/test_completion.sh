@@ -123,7 +123,7 @@ source "${completion_script}"
 failures=0
 
 # Every function the completion script defines, sorted as the C locale does.
-lsm_funcs='_lsm _lsm_ansi_c _lsm_arg_index _lsm_flag_value _lsm_join _lsm_listcontains _lsm_ordinal _lsm_possible_args _lsm_unescape _lsm_values'
+lsm_funcs='_lsm _lsm_ansi_c _lsm_arg_index _lsm_flag_value _lsm_join _lsm_listcontains _lsm_ordinal _lsm_possible_args _lsm_scan _lsm_unescape _lsm_values'
 
 function fail()
 {
@@ -144,6 +144,8 @@ function check_words()
     shift 2
     COMP_WORDS=("$@")
     COMPREPLY=()
+    # The line as typed, which a test sets when it matters.
+    COMP_LINE="${test_line-}"
 
     rm -f "${LSM_TEST_ARGV}"
     # Anything written to stderr lands on the user's command line, and it is
@@ -158,6 +160,16 @@ function check_words()
         fail "'${COMP_WORDS[*]}' (rc ${rc})" \
              "expected: [${expected}] actual: [${actual}]"
     fi
+}
+
+# As check_words, for the last of the words being the one completed.
+# $1 Expected COMPREPLY entries, '|' separated
+# $@ The words
+function check_end()
+{
+    local expected="$1"
+    shift
+    check_words "${expected}" "$(( $# - 1 ))" "$@"
 }
 
 # Run _lsm for a command line and compare the resulting COMPREPLY.
@@ -347,6 +359,113 @@ check_words "init-filtered" 5 lsmcli x --ag 'back\\slash' --init ""
 check_stub_args yes '[--ag][back\slash]' "--ag with an escaped backslash"
 check_words "${PAYLOAD_ESC}|snap-one" 5 lsmcli x --fs 'fs\ one' --snap ""
 check_stub_args yes "[--fs][fs one]" "escaped --fs"
+
+# The sub command is the first word that is not a global option or the value of
+# one, wherever that is, and the first word, lsmcli, is never looked at. bash
+# splits --uri=sim://x into --uri = sim : //x, so the words below are as bash
+# gives them, one per column.
+#
+# Command line                      | word     | expected completions
+cmd_tests=(
+    "lsmcli -b volume-create|--|--name|--size|--pool"
+    "lsmcli -H -b -s volume-create|--n|--name"
+    "lsmcli -u sim : // volume-delete||--vol|--force"
+    "lsmcli -u sim : //x : 80/y volume-delete||--vol|--force"
+    "lsmcli --uri = sim : //h volume-delete||--vol|--force"
+    "lsmcli -usim : // volume-delete||--vol|--force"
+    "lsmcli -t , volume-delete||--vol|--force"
+    "lsmcli -t: volume-delete||--vol|--force"
+    "lsmcli --terse = , volume-delete||--vol|--force"
+    "lsmcli -w 100 -H volume-delete||--vol|--force"
+    "lsmcli --wait = 100 volume-delete||--vol|--force"
+    "lsmcli --fork_plugin /x/y -u sim : // volume-delete||--vol|--force"
+    "lsmcli volume-delete -u sim : //||--vol|--force"
+    "lsmcli -v|access-group-c|access-group-create"
+    "lsmcli -u sim : //|access-group-c|access-group-create"
+    "lsmcli -H -b|zz|"
+    "/usr/bin/lsmcli|volume-d|volume-delete|volume-dependants|volume-dependants-rm|volume-disable"
+    "./lsmcli volume-delete||--vol|--force"
+    "/usr/bin/lsmcli -u sim : // vd||--vol|--force"
+    "lsmcli -H|--ver|--version"
+    # Nothing to offer where a value is being typed.
+    "lsmcli -u||"
+    "lsmcli -u|sim|"
+    "lsmcli -u sim :||"
+    "lsmcli -u sim :|//|"
+    "lsmcli -u sim : //x :||"
+    "lsmcli --uri||"
+    "lsmcli --uri =||"
+    "lsmcli --uri = sim :|//|"
+    "lsmcli -t||"
+    "lsmcli --terse||"
+    "lsmcli -w||"
+    "lsmcli --wait||"
+    "lsmcli --fork_plugin||"
+    "lsmcli -H -u||"
+    "lsmcli volume-delete -u||"
+    "lsmcli volume-delete --vol x -t||"
+    # The list aliases stand for 'list --type', so --type is not offered.
+    "lsmcli ls||--sys|--pool|--vol|--disk|--ag|--fs|--nfs-export|--tgt"
+    "lsmcli lp --vol x||--sys|--pool|--disk|--ag|--fs|--nfs-export|--tgt"
+    "lsmcli -H lv||--sys|--pool|--vol|--disk|--ag|--fs|--nfs-export|--tgt"
+    "lsmcli list||--type|--sys|--pool|--vol|--disk|--ag|--fs|--nfs-export|--tgt"
+    "lsmcli list --type volumes||--sys|--pool|--vol|--disk|--ag|--fs|--nfs-export|--tgt"
+    # SNAPSHOTS needs a file system, whatever the case and wherever the list.
+    "lsmcli list --type snapshots||--fs"
+    "lsmcli list --type SNAPSHOTS||--fs"
+    "lsmcli list --type Snapshots|--f|--fs"
+    "lsmcli -H list --type snapshots||--fs"
+    "lsmcli -u sim : // -b list --type SNAPSHOTS||--fs"
+    "lsmcli x --type snapshots||"
+    "lsmcli list snapshots|--ty|--type"
+)
+for t in "${cmd_tests[@]}" ; do
+    IFS='|' read -r comp_line cur expected_head rest <<< "${t}"
+    expected="${expected_head}"
+    [[ -n ${rest} ]] && expected="${expected_head}|${rest}"
+    check "${comp_line}" "${cur}" "${expected}"
+done
+# The first word, and the last of a line that is all there is.
+check_words "" 0 lsmcli
+check_words "" 0 ""
+
+# The URI on the command line is passed on to every look-up, and nothing else
+# is: -P would prompt for a password, and the value could be for another array.
+check_end "${PAYLOAD_ESC}|vol-one" lsmcli volume-delete --vol ""
+check_stub_args no "[-u]" "no URI on the command line"
+check_end "${PAYLOAD_ESC}|vol-one" lsmcli -u sim : // volume-delete --vol ""
+check_stub_args yes "[-u][sim://]" "-u sim://"
+check_stub_args no "[-P]" "-u sim://"
+check_end "${PAYLOAD_ESC}|vol-one" lsmcli --uri = sim : //x : 80 volume-delete --vol ""
+check_stub_args yes "[-u][sim://x:80]" "--uri=sim://x:80"
+check_end "${PAYLOAD_ESC}|vol-one" lsmcli -usim : // volume-delete --vol ""
+check_stub_args yes "[-u][sim://]" "-usim://"
+check_end "${PAYLOAD_ESC}|vol-one" lsmcli -u '"sim://a b"' volume-delete --vol ""
+check_stub_args yes "[-u][sim://a b]" "a quoted URI"
+check_end "${PAYLOAD_ESC}|vol-one" lsmcli -u 'sim://a\ b' volume-delete --vol ""
+check_stub_args yes "[-u][sim://a b]" "an escaped URI"
+check_end "${PAYLOAD_ESC}|vol-one" lsmcli volume-delete -u sim : // --vol ""
+check_stub_args yes "[-u][sim://]" "-u after the sub command"
+check_end "${PAYLOAD_ESC}|vol-one" lsmcli -u a : // -u b : // volume-delete --vol ""
+check_stub_args yes "[-u][b://]" "the last -u"
+check_end "${PAYLOAD_ESC}|vol-one" lsmcli -t , volume-delete --vol ""
+check_stub_args no "[-u]" "-t on the command line"
+check_end "init-filtered" lsmcli -u sim : // access-group-add --ag ag-one --init ""
+check_stub_args yes "[-u][sim://]" "--init filtered by --ag"
+check_stub_args yes "[--ag][ag-one]" "--init filtered by --ag"
+# The words say nothing of white space, the line does. 'sim: volume-delete' is
+# not a URI of sim:volume-delete, so there is no telling what the URI is and
+# no look-up is made, rather than one against some other array.
+test_line='lsmcli -u sim: volume-delete --vol '
+check_end "" lsmcli -u sim : volume-delete --vol ""
+[[ -e ${LSM_TEST_ARGV} ]] && fail "lsmcli run with a URI that cannot be made out"
+test_line='lsmcli -u sim:// volume-delete --vol '
+check_end "${PAYLOAD_ESC}|vol-one" lsmcli -u sim : // volume-delete --vol ""
+check_stub_args yes "[-u][sim://]" "a URI that is in the line as typed"
+test_line='lsmcli -u "" volume-delete --vol '
+check_end "" lsmcli -u '""' volume-delete --vol ""
+[[ -e ${LSM_TEST_ARGV} ]] && fail "lsmcli run with an empty URI"
+test_line=''
 
 # More words than an exit status can count, with --ag at a position that a
 # status truncated modulo 256 would get wrong, or confuse with 'not found'.
