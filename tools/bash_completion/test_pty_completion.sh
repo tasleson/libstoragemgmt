@@ -37,6 +37,11 @@ if [[ ${1-} != list ]] ; then
     echo END
     exit 0
 fi
+# A look-up that hangs, until it is interrupted. The file tells that it is.
+if [[ -n ${LSM_PTY_HANG-} ]] ; then
+    : > "${LSM_PTY_HANG}"
+    sleep 60
+fi
 sep=''
 for arg in "$@" ; do
     case "${arg}" in -t?*) sep="${arg#-t}" ;; esac
@@ -165,6 +170,69 @@ def run_case(typed, meant):
         os.close(fd)
 
 
+def run_interrupted():
+    """A completion that is interrupted leaves the shell as it was."""
+    hang = os.path.join(os.environ["LSM_PTY_DIR"], "hanging")
+    env = dict(os.environ, PS1="PROMPT> ", TERM="dumb",
+               LSMCLI_AUTO_COMPLETE_VALUE="1", LSM_PTY_HANG=hang,
+               PATH=os.environ["LSM_PTY_DIR"] + ":" + os.environ["PATH"])
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execvpe("bash", ["bash", "--norc", "--noprofile", "-i"], env)
+
+    def read_until(pattern):
+        data = ""
+        end = time.time() + TIMEOUT
+        while not re.search(pattern, data):
+            wait = end - time.time()
+            if wait <= 0:
+                return None
+            ready, _, _ = select.select([fd], [], [], min(wait, 0.2))
+            if ready:
+                try:
+                    chunk = os.read(fd, 4096)
+                except OSError:
+                    return None
+                data += chunk.decode(errors="replace")
+        return data
+
+    try:
+        for line in ("source '%s'" % os.environ["LSM_PTY_SCRIPT"],
+                     "shopt -s nocasematch", "IFS=a"):
+            if read_until(r"PROMPT> $") is None:
+                return "no prompt before %r" % line
+            os.write(fd, (line + "\n").encode())
+        if read_until(r"PROMPT> $") is None:
+            return "no prompt after setting up"
+        os.write(fd, b"lsmcli volume-delete --vol \t")
+        end = time.time() + TIMEOUT
+        while not os.path.exists(hang) and time.time() < end:
+            time.sleep(0.05)
+        if not os.path.exists(hang):
+            return "the look-up never started"
+        os.write(fd, b"\x03")
+        # What is left, one command, as the line may hold what was typed.
+        if read_until(r"PROMPT> $") is None:
+            return "no prompt after Ctrl-C"
+        os.write(fd, b"\x15IFS=$' \\t\\n'; echo NC_$(shopt -q nocasematch && echo yes || echo no)"
+                 b" VARS=$(compgen -v | grep -c '^_lsm')\n")
+        seen = read_until(r"VARS=\d+\r?\n")
+        if seen is None:
+            return "no answer after Ctrl-C"
+        if "NC_yes" not in seen:
+            return "nocasematch was not on after Ctrl-C: %r" % seen
+        if not re.search(r"VARS=0\r?\n", seen):
+            return "variables left after Ctrl-C: %r" % seen
+        return None
+    finally:
+        try:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+        except OSError:
+            pass
+        os.close(fd)
+
+
 def main():
     try:
         failures = 0
@@ -173,6 +241,10 @@ def main():
             if problem:
                 failures += 1
                 print("FAIL: %r: %s" % (typed, problem))
+        problem = run_interrupted()
+        if problem:
+            failures += 1
+            print("FAIL: interrupted look-up: %s" % problem)
         if failures:
             print("%d pty completion test(s) failed" % failures)
             return 1

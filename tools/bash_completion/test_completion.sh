@@ -129,7 +129,7 @@ source "${completion_script}"
 failures=0
 
 # Every function the completion script defines, sorted as the C locale does.
-lsm_funcs='_lsm _lsm_ansi_c _lsm_arg_index _lsm_complete _lsm_escape _lsm_flag_value _lsm_join _lsm_known_option _lsm_layout _lsm_listcontains _lsm_options _lsm_ordinal _lsm_possible_args _lsm_run _lsm_scan _lsm_unescape _lsm_values'
+lsm_funcs='_lsm _lsm_ansi_c _lsm_arg_index _lsm_complete _lsm_escape _lsm_expands _lsm_flag_value _lsm_join _lsm_known_option _lsm_layout _lsm_listcontains _lsm_options _lsm_ordinal _lsm_possible_args _lsm_run _lsm_scan _lsm_unescape _lsm_values'
 
 function fail()
 {
@@ -156,16 +156,18 @@ function check_words()
     # at the end.
     COMP_LINE="${test_line-}"
     if [[ -z ${test_line+set} ]] ; then
-        local i
+        local i cursor_at
         COMP_LINE=''
         for (( i = 0; i < $#; i++ )) ; do
             if (( i > 0 )) && [[ ${COMP_WORDS[i]} != [:=] && ${COMP_WORDS[i-1]} != [:=] ]] ; then
                 COMP_LINE+=' '
             fi
             COMP_LINE+="${COMP_WORDS[i]}"
+            # The cursor is at the end of the word being completed.
+            (( i == COMP_CWORD )) && cursor_at=${#COMP_LINE}
         done
     fi
-    COMP_POINT="${test_point-${#COMP_LINE}}"
+    COMP_POINT="${test_point-${cursor_at-${#COMP_LINE}}}"
 
     rm -f "${LSM_TEST_ARGV}"
     # Anything written to stderr lands on the user's command line, and it is
@@ -731,8 +733,11 @@ for unknown in --ur=sim://x --x=y --ur --u --zz ; do
     [[ -e ${LSM_TEST_ARGV} ]] && fail "${unknown} after the sub command, but lsmcli was run"
 done
 # A later -u makes up for what is before it, and not for what is after it.
-check_end "${PAYLOAD_ESC}|vol-one" lsmcli --ur x -u sim : // vd --vol ""
+check_end "${PAYLOAD_ESC}|vol-one" lsmcli --zz -u sim : // vd --vol ""
 check_stub_args yes "[-u][sim://]" "-u after an option that is not known"
+# --ur could take the next word as its value, and be the URI.
+check_end "" lsmcli --ur x -u sim : // vd --vol ""
+[[ -e ${LSM_TEST_ARGV} ]] && fail "--ur x before a -u, but lsmcli was run"
 check_end "" lsmcli -u sim : // --ur x vd --vol ""
 [[ -e ${LSM_TEST_ARGV} ]] && fail "--ur after -u, but lsmcli was run"
 # The cursor is in the middle of the line, with -u after it.
@@ -744,7 +749,7 @@ check_words "${PAYLOAD_ESC}|vol-one" 3 lsmcli vd --vol "" -u sim : //x
 test_line='lsmcli -u a:b vd --vol  -u c'
 test_point=23
 check_words "${PAYLOAD_ESC}|vol-one" 7 lsmcli -u a : b vd --vol "" -u c
-check_stub_args yes "[-u][c]" "the last -u, after the cursor"
+check_stub_args yes "[-u][a:b]" "the -u before the sub command, not the one after"
 test_line='lsmcli vd --vol  --uri=sim://y'
 test_point=16
 check_words "${PAYLOAD_ESC}|vol-one" 3 lsmcli vd --vol "" --uri = sim : //y
@@ -754,6 +759,149 @@ test_point=16
 check_words "" 3 lsmcli vd --vol "" -u
 [[ -e ${LSM_TEST_ARGV} ]] && fail "-u with no value after the cursor, but lsmcli was run"
 unset test_line test_point
+
+# Which -u lsmcli uses: cmdline.py copies the one after the sub command over
+# only if there was none before it, so the last one before the sub command
+# wins, and failing that the last one after it. Checked with argparse:
+#   -u a vd --vol x -u b   uses a        vd -u a -u b   uses b
+# Where the one that wins cannot be told there is no look-up, and the one that
+# loses does not matter.
+# Words, @ being where the cursor is, with an empty word | URI used, or - for
+# no look-up.
+uri_precedence_tests=(
+    "-u sim://a vd --vol @ -u sim://b|sim://a"
+    "vd -u sim://a -u sim://b --vol @|sim://b"
+    "-u sim://a -u sim://b vd --vol @|sim://b"
+    "vd -u sim://a --vol @|sim://a"
+    "-u sim://a vd --vol @|sim://a"
+    "-u sim://a vd -u sim://b --vol @ -u sim://c|sim://a"
+    "vd --vol @ -u sim://b -u sim://c|sim://c"
+    "vd --vol @ -u sim://b --uri sim://c|sim://c"
+    "-u a: vd --vol @|a:"
+    "-u '' vd -u sim://b --vol @|-"
+    "-u sim://\$X vd -u sim://b --vol @|-"
+    "-u sim://a vd -u '' --vol @|sim://a"
+    "vd -u '' -u sim://b --vol @|sim://b"
+    "vd -u sim://b -u '' --vol @|-"
+    "-u sim://a --ur x vd --vol @|-"
+    "--ur x vd -u sim://b --vol @|-"
+    "vd --ur x -u sim://b --vol @|sim://b"
+    "vd -u sim://b --ur x --vol @|-"
+    "-u sim://a vd --ur x --vol @|sim://a"
+)
+for t in "${uri_precedence_tests[@]}" ; do
+    IFS='|' read -r words used <<< "${t}"
+    read -r -a line_words <<< "lsmcli ${words}"
+    cword=0
+    for (( n = 0; n < ${#line_words[@]}; n++ )) ; do
+        if [[ ${line_words[n]} == @ ]] ; then
+            line_words[n]=''
+            cword=${n}
+        fi
+    done
+    if [[ ${used} == - ]] ; then
+        check_words "" "${cword}" "${line_words[@]}"
+        [[ -e ${LSM_TEST_ARGV} ]] && fail "'${words}' ran lsmcli, the URI is not certain"
+    else
+        check_words "${PAYLOAD_ESC}|vol-one" "${cword}" "${line_words[@]}"
+        check_stub_args yes "[-u][${used}]" "'${words}'"
+        if grep -q -- '\[-u\].*\[-u\]' "${LSM_TEST_ARGV}" ; then
+            fail "'${words}' passed -u more than once"
+        fi
+    fi
+done
+
+# The word under the cursor is on the line, unless it is empty, and it can be
+# a -u: bash gives the whole word as the cursor word whatever the cursor is
+# in. These are as recorded from an interactive bash for the cursor at the
+# start, inside and at the end of the word. What lsmcli would make of such
+# a line is not known, so there is no look-up.
+# COMP_WORDS (a space between words) | COMP_CWORD | COMP_POINT | COMP_LINE
+recorded_tests=(
+    "lsmcli vd --vol -u sim : //a|3|16|lsmcli vd --vol -u sim://a"
+    "lsmcli vd --vol -u sim : //a|3|17|lsmcli vd --vol -u sim://a"
+    "lsmcli vd --vol -u sim : //a|3|18|lsmcli vd --vol -u sim://a"
+    "lsmcli vd --vol --uri sim : //a|3|17|lsmcli vd --vol --uri sim://a"
+    "lsmcli vd --vol -u|3|16|lsmcli vd --vol -u"
+    "lsmcli vd --vol -u|3|17|lsmcli vd --vol -u"
+    "lsmcli vd --vol -u|3|18|lsmcli vd --vol -u"
+)
+for t in "${recorded_tests[@]}" ; do
+    IFS='|' read -r words cword point line <<< "${t}"
+    read -r -a line_words <<< "${words}"
+    test_line="${line}"
+    test_point="${point}"
+    check_words "" "${cword}" "${line_words[@]}"
+    [[ -e ${LSM_TEST_ARGV} ]] && fail "'${line}' with the cursor at ${point} ran lsmcli"
+done
+unset test_line test_point
+
+# -u=x is x or =x depending on the argparse of the Python, so it is not
+# certain, while -u =x as two words is =x everywhere.
+check_end "" lsmcli -u = sim : //x vd --vol ""
+[[ -e ${LSM_TEST_ARGV} ]] && fail "-u=sim://x ran lsmcli"
+test_line='lsmcli -u =sim://x vd --vol '
+check_end "${PAYLOAD_ESC}|vol-one" lsmcli -u =sim : //x vd --vol ""
+check_stub_args yes "[-u][=sim://x]" "-u =sim://x"
+unset test_line
+check_end "${PAYLOAD_ESC}|vol-one" lsmcli --uri = sim : //x vd --vol ""
+check_stub_args yes "[-u][sim://x]" "--uri=sim://x"
+
+# What the shell would expand is not what is written, so the URI, or a filter
+# value, that has any of it is not known. Nothing is expanded, evaluated or
+# run to find that out. Typed word | what it is about
+expansion_tests=(
+    'sim://$S'
+    '"$URI"'
+    '$URI'
+    '~/x'
+    'sim://{a,b}'
+    'sim://a*'
+    'sim://a?'
+    'sim://[ab]'
+    '"$(touch ${LSM_TEST_MARKER})"'
+    '$(touch ${LSM_TEST_MARKER})'
+    '`touch ${LSM_TEST_MARKER}`'
+    '"`touch ${LSM_TEST_MARKER}`"'
+    'sim://a!b'
+    '"sim://a!b"'
+    '"a$"'
+)
+for typed in "${expansion_tests[@]}" ; do
+    check_end "" lsmcli -u "${typed}" vd --vol ""
+    [[ -e ${LSM_TEST_ARGV} ]] && fail "-u ${typed} ran lsmcli"
+    check_end "" lsmcli aa --ag "${typed}" --init ""
+    [[ -e ${LSM_TEST_ARGV} ]] && fail "--ag ${typed} ran lsmcli"
+    check_end "" lsmcli fs-snap-delete --fs "${typed}" --snap ""
+    [[ -e ${LSM_TEST_ARGV} ]] && fail "--fs ${typed} ran lsmcli"
+done
+# Protected from the shell, they are what they say.
+quoted_tests=(
+    "'sim://\$S'|sim://\$S"
+    "sim://\\\$S|sim://\$S"
+    "\$'sim://a*'|sim://a*"
+    "'~/x'|~/x"
+    "\\~/x|~/x"
+    "sim://a~|sim://a~"
+    "'sim://{a,b}'|sim://{a,b}"
+    "\"sim://a*\"|sim://a*"
+    "\"sim://\\\$S\"|sim://\$S"
+    "sim://a\\!b|sim://a!b"
+    "'sim://a!b'|sim://a!b"
+)
+for t in "${quoted_tests[@]}" ; do
+    IFS='|' read -r typed meant <<< "${t}"
+    check_end "${PAYLOAD_ESC}|vol-one" lsmcli -u "${typed}" vd --vol ""
+    check_stub_args yes "[-u][${meant}]" "-u ${typed}"
+    check_end "init-filtered" lsmcli aa --ag "${typed}" --init ""
+    check_stub_args yes "[--ag][${meant}]" "--ag ${typed}"
+done
+# A URI that is a command or an alias is replaced by what it stands for, by
+# lsmcli, before it reads the options.
+check_end "" lsmcli -u ls vd --vol ""
+[[ -e ${LSM_TEST_ARGV} ]] && fail "-u ls ran lsmcli"
+# What is typed so far is matched as it was, with a $ in it.
+check_end "${PAYLOAD_ESC}" lsmcli capabilities --sys '\$('
 # What is typed, not just the words, says where there was white space. This
 # line has -u a, and the b is another word, which is what a substring of the
 # line would not tell.
@@ -845,6 +993,30 @@ for body in "${ansi_bodies[@]}" ; do
     [[ ${mine} == "${real}" ]] || \
         fail "\$'${body}' read as $(printf '%q' "${mine}"), bash reads $(printf '%q' "${real}")"
 done
+
+# The completion is done in a subshell, so how the user has set up the shell
+# neither changes it nor is changed by it: a word splitting IFS, and
+# nocasematch, which is still on afterwards, as it would be if the completion
+# was interrupted. And no match is no entries, not one empty entry.
+COMP_WORDS=(lsmcli volume-create "")
+COMP_CWORD=2
+COMP_LINE="lsmcli volume-create "
+COMP_POINT=${#COMP_LINE}
+IFS=a
+shopt -s nocasematch
+_lsm
+shopt -q nocasematch || fail "nocasematch was turned off by the completion"
+shopt -u nocasematch
+IFS=$' \t\n'
+[[ ${COMPREPLY[*]} == '--name --size --pool --provisioning' && ${#COMPREPLY[@]} -eq 4 ]] || \
+    fail "with IFS=a the completion was [${COMPREPLY[*]}]"
+COMP_WORDS=(lsmcli volume-create "zz")
+COMP_CWORD=2
+COMP_LINE="lsmcli volume-create zz"
+COMP_POINT=${#COMP_LINE}
+COMPREPLY=(stale)
+_lsm
+[[ ${#COMPREPLY[@]} -eq 0 ]] || fail "no match left ${#COMPREPLY[@]} entries"
 
 # Nothing above may have run the payload.
 if [[ -e ${LSM_TEST_MARKER} ]] ; then

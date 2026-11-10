@@ -10,14 +10,20 @@
 # LSMCLI_AUTO_COMPLETE_VALUE=1 is set in the environment. It is read on every
 # completion, so it can be exported or changed after this file is sourced.
 #
-# Everything defined here is prefixed with _lsm so sourcing this file does not
-# clobber functions of the user's shell, eg. 'join'. The helpers use no
-# variable names of their own that could collide with the caller's either:
-# scratch variables are 'local', and results come back through a variable
-# whose name the caller passes in.
+# A look-up uses the URI given with -u on the command line, if there is one,
+# else what lsmcli is set up with in the shell. A variable given to the command
+# alone, as in 'LSMCLI_URI=other lsmcli vd --vol <TAB>', is taken off the line
+# by bash before completion sees it, so the look-up is not for 'other'.
 #
-# Needs bash 4.0 or later, for ${var,,}, and 4.2 for printf to know \u and \U
-# as $'...' in a word typed with one.
+# Everything defined here is prefixed with _lsm so sourcing this file does not
+# clobber functions of the user's shell, eg. 'join'. The completion itself is
+# done in a subshell, see _lsm, so it changes nothing in the user's shell. The
+# helpers have 'local' scratch variables, so they are safe to call from
+# elsewhere too, and results come back through a variable whose name the caller
+# passes in, or, as noted for the ones that do, in a variable of _lsm_complete.
+#
+# Needs bash 4.0 or later, for mapfile and ${var,,}, and 4.2 for printf to know
+# \u and \U as $'...' in a word typed with one.
 
 # Join the arguments with a separator. printf, as echo would take a leading
 # -n or -e for an option.
@@ -47,15 +53,16 @@ function _lsm_listcontains()
 # command line.
 # $1 What is possible
 # $2 What of that can be repeated
-# The result is left in $_lsm_potential_args, which _lsm declares local, so
-# it is _lsm that gets it and nothing is left behind in the shell.
+# The result is left in $_lsm_potential_args, a variable of the caller, which
+# is _lsm_complete, in a subshell.
 function _lsm_possible_args()
 {
     local -a _lsm_left=() _lsm_possible=() _lsm_words=()
     local _lsm_i
 
-    # The word being completed is not on the line yet: with --ag typed in
-    # full and the cursor after it, --ag is still what is wanted.
+    # The word being completed is what its own completion is made from, so it
+    # does not count as used: with --ag typed in full and the cursor right
+    # after it, --ag is still what is wanted.
     _lsm_words=("${COMP_WORDS[@]}")
     [[ -z ${COMP_CWORD-} ]] || unset "_lsm_words[${COMP_CWORD}]"
 
@@ -75,8 +82,7 @@ function _lsm_possible_args()
 }
 
 # Look for the last time a word is on the command line, as that is the one
-# that counts for lsmcli when an option is given twice. The word being
-# completed is not looked at, as it is not there yet.
+# that counts for lsmcli when an option is given twice.
 # $1 The word to look for
 # $2 Name of the variable to set to the position of the word in COMP_WORDS
 # Returns 0 if found, else 1 and the variable is left alone. The position is
@@ -86,7 +92,6 @@ function _lsm_arg_index()
     local _lsm_i
 
     for (( _lsm_i = ${#COMP_WORDS[@]} - 1; _lsm_i >= 0; _lsm_i-- )) ; do
-        [[ ${_lsm_i} == "${COMP_CWORD-}" ]] && continue
         if [[ ${COMP_WORDS[_lsm_i]} == "$1" ]] ; then
             printf -v "$2" '%d' "${_lsm_i}"
             return 0
@@ -343,6 +348,64 @@ function _lsm_escape()
     printf -v "$3" '%s' "${_lsm_v}"
 }
 
+# Would the shell, reading a word, change it in a way that depends on what is
+# in the shell or on disk: a variable, a command substitution, a ~, a glob,
+# a brace expansion, or in an interactive shell a history reference. Nothing
+# is expanded or evaluated here. Quotes and backslashes are read as
+# _lsm_unescape does: single quotes and $'...' protect all of it, double quotes
+# all but $, a backtick and !. It is a conservative test, as a ! or { that
+# would have been left alone counts too, since the word is not to be taken as
+# the value it spells out unless that is certain.
+# $1 The word
+# Returns 0 if it would be expanded.
+function _lsm_expands()
+{
+    local _lsm_in="$1"
+    local _lsm_state=none
+    local _lsm_len=${#_lsm_in}
+    local _lsm_i _lsm_c
+
+    for (( _lsm_i = 0; _lsm_i < _lsm_len; _lsm_i++ )) ; do
+        _lsm_c="${_lsm_in:_lsm_i:1}"
+        case "${_lsm_state}" in
+        none)
+            case "${_lsm_c}" in
+                '\') (( ++_lsm_i )) ;;
+                "'") _lsm_state=single ;;
+                '"') _lsm_state=double ;;
+                '$')
+                    if [[ ${_lsm_in:_lsm_i+1:1} == "'" ]] ; then
+                        _lsm_state=ansi
+                        (( ++_lsm_i ))
+                    else
+                        return 0
+                    fi
+                    ;;
+                '`'|'*'|'?'|'['|'{'|'!') return 0 ;;
+                '~') [[ ${_lsm_i} -ne 0 ]] || return 0 ;;
+            esac
+            ;;
+        single)
+            [[ ${_lsm_c} != "'" ]] || _lsm_state=none
+            ;;
+        ansi)
+            case "${_lsm_c}" in
+                '\') (( ++_lsm_i )) ;;
+                "'") _lsm_state=none ;;
+            esac
+            ;;
+        double)
+            case "${_lsm_c}" in
+                '\') (( ++_lsm_i )) ;;
+                '"') _lsm_state=none ;;
+                '$'|'`'|'!') return 0 ;;
+            esac
+            ;;
+        esac
+    done
+    return 1
+}
+
 # Find out which words of COMP_WORDS follow the one before them with no white
 # space in between, using COMP_LINE, which is the line as typed. bash breaks
 # words at every character of COMP_WORDBREAKS that is in one, and that
@@ -351,7 +414,7 @@ function _lsm_escape()
 # was typed is only trusted if the words are found in COMP_LINE one after the
 # other, else nothing is known about the layout and nothing that needs it is
 # to be relied on.
-# Sets, in the caller, _lsm:
+# Sets, as variables of the caller, which is _lsm_complete:
 #   _lsm_glue[i]      1 if word i follows word i-1 with no white space
 #   _lsm_layout_ok    0 if the words could not be matched to COMP_LINE
 # The cursor, COMP_POINT, is what tells if the empty word of an empty
@@ -428,9 +491,10 @@ function _lsm_run()
 # is 2 if the flag is there but what its value is cannot be told: the layout
 # of the line is not known, so a value with a : or = in it cannot be put back
 # together, or it is given as --flag=value in one word, or the cursor is in
-# it. The caller is to take it that the filter is not to be left out then.
+# it, or it has something in it that the shell would expand, such as a $ or
+# a *. The caller is to take it that the filter is not to be left out then.
 # When the flag is given more than once the last one counts.
-# Uses _lsm_glue and _lsm_layout_ok of the caller, _lsm.
+# Uses _lsm_glue and _lsm_layout_ok, see _lsm_layout.
 function _lsm_flag_value()
 {
     local _lsm_index _lsm_start _lsm_end _lsm_text _lsm_word
@@ -459,6 +523,8 @@ function _lsm_flag_value()
         return 2
     fi
     [[ -n ${_lsm_text} && ${_lsm_text} != -* ]] || return 1
+    # What the shell would make of it is not what is written.
+    ! _lsm_expands "${_lsm_text}" || return 2
     _lsm_unescape "${_lsm_text}" "$2"
     [[ -n ${!2} ]] || return 1
     return 0
@@ -468,7 +534,7 @@ function _lsm_flag_value()
 # command is not one lsmcli has, which is not for completion to tell.
 # $1 The option
 # $2 The sub command
-# Reads $_lsm_opts_cmds of the caller, _lsm.
+# Reads $_lsm_opts_cmds, which _lsm_complete sets.
 function _lsm_known_option()
 {
     local _lsm_args _lsm_repeat _lsm_c
@@ -492,15 +558,22 @@ function _lsm_known_option()
 # The line is read as the shell reads it, as words of text that may be put
 # together from several of COMP_WORDS, see _lsm_layout, and all of it is read,
 # including what is after the cursor, as global options are accepted after
-# the sub command too and -u anywhere on the line is the array the command is
-# for. The last -u counts, as for lsmcli. Wrong is worse than nothing here, as
-# the look-up of values is then for another array, so whenever the URI is not
-# certain, that is if the line has an option that is not known, which could
-# be an abbreviation of --uri, such as --ur, or the layout is not known, the
-# state is bad and no look-up is to be made. Options of the sub command are
-# known ones, and one a later -u follows does not matter.
+# the sub command too, and the word under the cursor is on the line like any
+# other unless it is empty.
 #
-# The results are left in the variables of the caller, _lsm, as for
+# Which -u counts is what lsmcli does with it: an option given before the sub
+# command is the root one, and one after it the sub command's, and cmdline.py
+# copies the second over only when the first was not given. So the last -u
+# before the sub command wins if there is one, else the last one after it.
+# Wrong is worse than nothing here, as the look-up of values is then for
+# another array, so whenever the URI is not certain the state is bad and no
+# look-up is to be made. That is if the URI that wins is empty, has a
+# =, is a command or alias name or has something in it the shell would
+# expand, or the line has an option that is not known, which could be an
+# abbreviation of --uri such as --ur, after the last -u of its side, or the
+# layout is not known. Options of the sub command are known ones.
+#
+# The results are left in variables _lsm_complete has, as for
 # _lsm_possible_args:
 #   _lsm_cmd        the sub command, empty if there is none yet
 #   _lsm_in_value   1 if the word being completed is part of the value of a
@@ -511,7 +584,9 @@ function _lsm_known_option()
 function _lsm_scan()
 {
     local _lsm_i _lsm_end _lsm_text _lsm_name _lsm_value _lsm_next _lsm_vend
-    local _lsm_c _lsm_cmd_found=0 _lsm_has_value _lsm_on_cursor
+    local _lsm_c _lsm_cmd_found=0 _lsm_seen_cmd=0 _lsm_has_value _lsm_side=pre
+    local _lsm_pre_state=none _lsm_pre_uri='' _lsm_post_state=none
+    local _lsm_post_uri='' _lsm_plain
 
     _lsm_cmd=''
     _lsm_in_value=0
@@ -524,17 +599,10 @@ function _lsm_scan()
         _lsm_run "${_lsm_i}" _lsm_text _lsm_end || true
         _lsm_next=$(( _lsm_end + 1 ))
         _lsm_has_value=0
-        _lsm_on_cursor=0
-        (( _lsm_i <= COMP_CWORD && COMP_CWORD <= _lsm_end )) && _lsm_on_cursor=1
 
         case "${_lsm_text}" in
             -u|--uri|-t|--terse|-w|--wait|--fork_plugin)
-                # The value is the word after, unless the cursor is on this
-                # and it is the option that is being typed.
-                if (( _lsm_on_cursor )) ; then
-                    _lsm_i=${_lsm_next}
-                    continue
-                fi
+                # The value is the word after.
                 _lsm_name="${_lsm_text}"
                 _lsm_value=''
                 _lsm_vend=${_lsm_end}
@@ -551,7 +619,7 @@ function _lsm_scan()
                 fi
                 ;;
             --uri=*|--terse=*|--wait=*|--fork_plugin=*|-[utw]?*)
-                if (( _lsm_on_cursor )) ; then
+                if (( _lsm_i <= COMP_CWORD && COMP_CWORD <= _lsm_end )) ; then
                     _lsm_in_value=1
                     return 0
                 fi
@@ -561,8 +629,13 @@ function _lsm_scan()
                 else
                     _lsm_name="${_lsm_text:0:2}"
                     _lsm_value="${_lsm_text:2}"
+                    # -u=x is x to the argparse of some versions of Python
+                    # and =x to those of others.
+                    if [[ ${_lsm_value} == =* ]] ; then
+                        _lsm_has_value=2
+                    fi
                 fi
-                _lsm_has_value=1
+                [[ ${_lsm_has_value} != 0 ]] || _lsm_has_value=1
                 _lsm_vend=${_lsm_end}
                 ;;
             # Global options that take no value, and any of the short ones
@@ -571,17 +644,24 @@ function _lsm_scan()
             --script|--header|-h|--help|-[vPHefbsh][vPHefbsh]*)
                 ;;
             -*)
-                # The one being typed is not an option that is on the line
-                # yet, but any other has to be known to be skipped over.
-                if (( ! _lsm_on_cursor )) ; then
-                    _lsm_c="${_lsm_text%%=*}"
-                    if (( ! _lsm_cmd_found )) || \
-                            ! _lsm_known_option "${_lsm_c}" "${_lsm_cmd}" ; then
-                        _lsm_uri_state=bad
-                    fi
+                # Any other has to be known to be skipped over, as it could
+                # be --uri abbreviated, with its value.
+                _lsm_c="${_lsm_text%%=*}"
+                if (( ! _lsm_cmd_found )) || \
+                        ! _lsm_known_option "${_lsm_c}" "${_lsm_cmd}" ; then
+                    printf -v "_lsm_${_lsm_side}_state" '%s' bad
+                    printf -v "_lsm_${_lsm_side}_uri" '%s' ''
                 fi
                 ;;
+            '')
+                # The empty word at the cursor, which is not on the line.
+                ;;
             *)
+                # The first word that is none of the above is the sub command,
+                # whether it is complete or not, for the side an option is on,
+                # and the one to complete the options of if it is before the
+                # cursor.
+                _lsm_seen_cmd=1
                 if (( ! _lsm_cmd_found && _lsm_end < COMP_CWORD )) ; then
                     _lsm_cmd="${_lsm_text}"
                     _lsm_cmd_found=1
@@ -589,20 +669,36 @@ function _lsm_scan()
                 ;;
         esac
 
-        if (( _lsm_has_value )) ; then
-            if [[ ${_lsm_name} == -u || ${_lsm_name} == --uri ]] ; then
-                _lsm_unescape "${_lsm_value}" _lsm_uri
-                if (( _lsm_has_value == 1 && _lsm_layout_ok )) && [[ -n ${_lsm_uri} ]] ; then
-                    _lsm_uri_state=ok
-                else
-                    _lsm_uri=''
-                    _lsm_uri_state=bad
-                fi
+        if (( _lsm_has_value )) && \
+                [[ ${_lsm_name} == -u || ${_lsm_name} == --uri ]] ; then
+            _lsm_unescape "${_lsm_value}" _lsm_plain
+            if (( _lsm_has_value == 1 && _lsm_layout_ok )) \
+                    && [[ -n ${_lsm_plain} ]] \
+                    && ! _lsm_expands "${_lsm_value}" \
+                    && [[ " ${_lsm_opts_cmds} " != *" ${_lsm_plain} "* ]] ; then
+                printf -v "_lsm_${_lsm_side}_state" '%s' ok
+                printf -v "_lsm_${_lsm_side}_uri" '%s' "${_lsm_plain}"
+            else
+                printf -v "_lsm_${_lsm_side}_state" '%s' bad
+                printf -v "_lsm_${_lsm_side}_uri" '%s' ''
             fi
-            _lsm_end=${_lsm_vend}
         fi
+        (( _lsm_has_value )) && _lsm_end=${_lsm_vend}
         _lsm_i=$(( _lsm_end + 1 ))
+        # Words after the sub command are the sub command's own.
+        if (( _lsm_seen_cmd )) ; then
+            _lsm_side=post
+        fi
     done
+
+    # The one before the sub command is the one that is used if it is there.
+    if [[ ${_lsm_pre_state} != none ]] ; then
+        _lsm_uri_state=${_lsm_pre_state}
+        _lsm_uri=${_lsm_pre_uri}
+    else
+        _lsm_uri_state=${_lsm_post_state}
+        _lsm_uri=${_lsm_post_uri}
+    fi
     return 0
 }
 
@@ -611,7 +707,8 @@ function _lsm_scan()
 # $2 Column number to use as the completion value, or 'all' to use every
 #    field of every line, for nfs_client_auth which prints one line of values
 # $@ Any remaining arguments are passed to lsmcli as-is
-# Reads $_lsm_cur, $_lsm_sep, $_lsm_uri and $_lsm_uri_state of the caller, _lsm.
+# Reads $_lsm_cur, $_lsm_sep, $_lsm_uri and $_lsm_uri_state, which
+# _lsm_complete and _lsm_scan set.
 #
 # The URI given on the command line, if any, is passed on, so the values are
 # those of the array the command is for rather than of the default one. When
@@ -639,6 +736,10 @@ function _lsm_values()
     _lsm_unescape "${_lsm_cur}" _lsm_plain _lsm_quote _lsm_skip
 
     COMPREPLY=()
+    # An option where the value is to be is not a value, and what lsmcli would
+    # make of the line is not known, eg. when it is a -u that is the word at
+    # the cursor.
+    [[ ${_lsm_cur} != -* ]] || return 0
     [[ ${_lsm_uri_state} == bad ]] && return 0
     [[ ${_lsm_uri_state} == ok ]] && _lsm_uri_args=(-u "${_lsm_uri}")
 
@@ -668,7 +769,7 @@ function _lsm_values()
 # compares the two, so keep them in step. --force is also offered where it
 # makes sense, though it is a global option.
 # $1 The sub command
-# Sets, in the caller, _lsm and the like:
+# Sets, as variables of the caller, which is _lsm_complete:
 #   _lsm_args    The options, in the order to offer them
 #   _lsm_repeat  The ones of those that can be given more than once, which
 #                are still offered after they are used
@@ -754,15 +855,6 @@ function _lsm_options()
 
 function _lsm_complete()
 {
-    local _lsm_cur _lsm_prev _lsm_sep _lsm_potential_args _lsm_opts_short
-    local _lsm_opts_long _lsm_opts_cmds _lsm_list_type_args
-    local _lsm_ag_value _lsm_fs_value _lsm_list_filter_args _lsm_args
-    local _lsm_repeat _lsm_cmd _lsm_in_value _lsm_uri _lsm_uri_state
-    local _lsm_rep_types _lsm_range_rep_types _lsm_policies _lsm_write_policies
-    local _lsm_raid_types _lsm_provisioning_types _lsm_led_states
-    local -a _lsm_glue
-    local _lsm_layout_ok
-
     # The ASCII unit separator, made for this and not something a name has in
     # it, unlike '#' or ' ', which split a value in two.
     _lsm_sep=$'\x1f'
@@ -985,22 +1077,26 @@ function _lsm_complete()
     return 0
 }
 
-# What the completion does is not to depend on how the user has set up the
-# shell, and nocasematch would make every case and [[ == ]] here match without
-# regard to case, so it is off while completing, and back after. A completion
-# that is interrupted leaves it off.
+# What the completion does must not depend on how the user has set up the
+# shell, and must leave it as it was, even when it is interrupted, as a look-up
+# that hangs is something that is to be interrupted. So it is all done in a
+# subshell, with nocasematch, which would make every case and [[ == ]] match
+# without regard to case, off, and the IFS that word splitting here relies on,
+# and only the result comes back, a line to each. That is a subshell for each
+# completion, which is a millisecond or so.
+# A value with a newline in it would be two, and plugins have none.
 function _lsm()
 {
-    local _lsm_nocase=0 _lsm_rc=0
-
-    if shopt -q nocasematch ; then
-        _lsm_nocase=1
+    COMPREPLY=()
+    mapfile -t COMPREPLY < <(
         shopt -u nocasematch
-    fi
-    _lsm_complete || _lsm_rc=$?
-    if (( _lsm_nocase )) ; then
-        shopt -s nocasematch
-    fi
-    return ${_lsm_rc}
+        IFS=$' \t\n'
+        _lsm_complete
+        if (( ${#COMPREPLY[@]} )) ; then
+            printf '%s\n' "${COMPREPLY[@]}"
+        fi
+        exit 0
+    )
+    return 0
 }
 complete -F _lsm lsmcli
