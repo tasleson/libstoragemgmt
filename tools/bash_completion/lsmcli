@@ -16,7 +16,14 @@
 # scratch variables are 'local', and results come back through a variable
 # whose name the caller passes in.
 
-function _lsm_join { local IFS="$1"; shift; echo "$*"; }
+# Join the arguments with a separator. printf, as echo would take a leading
+# -n or -e for an option.
+# $1 The separator
+function _lsm_join { local IFS="$1"; shift; printf '%s\n' "$*"; }
+
+# Note for the helpers taking the name of a variable, or of an array: the name
+# is used as the target of printf -v, or in an indirect expansion, and so must
+# never come from user or plugin data. Every caller passes a fixed name.
 
 # Linear search of an array of strings for the specified string
 # $1 Name of the array, with [@], eg. COMP_WORDS[@]
@@ -39,10 +46,13 @@ function _lsm_listcontains()
 # it is _lsm that gets it and nothing is left behind in the shell.
 function _lsm_possible_args()
 {
-    local -a _lsm_left=()
+    local -a _lsm_left=() _lsm_possible=()
     local _lsm_i
 
-    for _lsm_i in $1
+    # read rather than an unquoted expansion, which would glob an entry
+    # containing * or ?.
+    read -r -d '' -a _lsm_possible <<< "$1"
+    for _lsm_i in ${_lsm_possible[@]+"${_lsm_possible[@]}"}
     do
         _lsm_listcontains "COMP_WORDS[@]" "$_lsm_i" || _lsm_left+=("$_lsm_i")
     done
@@ -68,25 +78,135 @@ function _lsm_arg_index()
     return 1
 }
 
+# The character code of a character.
+# $1 The character
+# $2 Name of the variable to set to the code
+function _lsm_ordinal()
+{
+    printf -v "$2" '%d' "'$1" 2> /dev/null
+}
+
+# Turn the text between the quotes of a $'...' into what it stands for, as
+# bash does: \a \b \e \E \f \n \r \t \v \\ \' \" \? \nnn \xHH \cX \uHHHH and
+# \UHHHHHHHH. Anything else, including a backslash at the very end, is kept
+# as it is. Only digits, checked to be octal or hex, and the number of a
+# character, get into a printf format, so the text cannot be a format.
+# $1 The text, quotes not included
+# $2 Name of the variable to set
+function _lsm_ansi_c()
+{
+    local _lsm_in="$1"
+    local _lsm_out=''
+    local _lsm_len=${#_lsm_in}
+    local _lsm_c _lsm_next _lsm_digits _lsm_i _lsm_x _lsm_n _lsm_max
+
+    for (( _lsm_i = 0; _lsm_i < _lsm_len; _lsm_i++ )) ; do
+        _lsm_c="${_lsm_in:_lsm_i:1}"
+        if [[ ${_lsm_c} != '\' ]] ; then
+            _lsm_out+="${_lsm_c}"
+            continue
+        fi
+        _lsm_next="${_lsm_in:_lsm_i+1:1}"
+        case "${_lsm_next}" in
+            a) _lsm_out+=$'\a' ; (( ++_lsm_i )) ;;
+            b) _lsm_out+=$'\b' ; (( ++_lsm_i )) ;;
+            e|E) _lsm_out+=$'\e' ; (( ++_lsm_i )) ;;
+            f) _lsm_out+=$'\f' ; (( ++_lsm_i )) ;;
+            n) _lsm_out+=$'\n' ; (( ++_lsm_i )) ;;
+            r) _lsm_out+=$'\r' ; (( ++_lsm_i )) ;;
+            t) _lsm_out+=$'\t' ; (( ++_lsm_i )) ;;
+            v) _lsm_out+=$'\v' ; (( ++_lsm_i )) ;;
+            '\'|"'"|'"'|'?')
+                _lsm_out+="${_lsm_next}"
+                (( ++_lsm_i ))
+                ;;
+            x)
+                _lsm_digits="${_lsm_in:_lsm_i+2:2}"
+                _lsm_digits="${_lsm_digits%%[!0-9a-fA-F]*}"
+                if [[ -n ${_lsm_digits} ]] ; then
+                    printf -v _lsm_c "\\x${_lsm_digits}"
+                    _lsm_out+="${_lsm_c}"
+                    (( _lsm_i += 1 + ${#_lsm_digits} ))
+                else
+                    _lsm_out+='\'
+                fi
+                ;;
+            u|U)
+                if [[ ${_lsm_next} == u ]] ; then
+                    _lsm_max=4
+                else
+                    _lsm_max=8
+                fi
+                _lsm_digits="${_lsm_in:_lsm_i+2:_lsm_max}"
+                _lsm_digits="${_lsm_digits%%[!0-9a-fA-F]*}"
+                if [[ -n ${_lsm_digits} ]] ; then
+                    printf -v _lsm_c "\\${_lsm_next}${_lsm_digits}"
+                    _lsm_out+="${_lsm_c}"
+                    (( _lsm_i += 1 + ${#_lsm_digits} ))
+                else
+                    _lsm_out+='\'
+                fi
+                ;;
+            c)
+                # Control-X is X with the top bits cleared, and \c? is DEL.
+                # An X that is not ASCII is left as typed.
+                _lsm_x="${_lsm_in:_lsm_i+2:1}"
+                if [[ -n ${_lsm_x} ]] && _lsm_ordinal "${_lsm_x}" _lsm_n \
+                        && (( _lsm_n < 128 )) ; then
+                    if [[ ${_lsm_x} == '?' ]] ; then
+                        _lsm_n=127
+                    else
+                        (( _lsm_n &= 31 ))
+                    fi
+                    printf -v _lsm_c '%02x' "${_lsm_n}"
+                    printf -v _lsm_c "\\x${_lsm_c}"
+                    _lsm_out+="${_lsm_c}"
+                    (( _lsm_i += 2 ))
+                    # \c\\ is one control-\ , and bash does not see the second
+                    # backslash as the start of another escape.
+                    if [[ ${_lsm_x} == '\' && ${_lsm_in:_lsm_i+1:1} == '\' ]] ; then
+                        (( ++_lsm_i ))
+                    fi
+                else
+                    _lsm_out+='\'
+                fi
+                ;;
+            [0-7])
+                _lsm_digits="${_lsm_in:_lsm_i+1:3}"
+                _lsm_digits="${_lsm_digits%%[!0-7]*}"
+                printf -v _lsm_c "\\${_lsm_digits}"
+                _lsm_out+="${_lsm_c}"
+                (( _lsm_i += ${#_lsm_digits} ))
+                ;;
+            *) _lsm_out+='\' ;;
+        esac
+    done
+    printf -v "$2" '%s' "${_lsm_out}"
+}
+
 # Turn a word as the user typed it, which may be escaped or quoted, into the
 # value it stands for, the way the shell would read it but without evaluating
 # anything. Quoted and unquoted parts can follow each other, eg. 'a'"b"\ c.
 #   unquoted        a backslash escapes the next character, whatever it is
 #   "double quoted" a backslash escapes only \ " $ and `, else it is kept
 #   'single quoted' nothing is escaped
-#   $'ANSI-C'       what printf %q writes for a tab, newline and the like:
-#                   \a \b \e \E \f \n \r \t \v \\ \' \" \? \nnn and \xHH
+#   $'ANSI-C'       what printf %q writes for a tab, newline and the like,
+#                   see _lsm_ansi_c. A backslash escapes a quote here too, so
+#                   the closing quote is the first one nothing escapes.
 # A quote left open is fine, as that is the word being completed, and so is
 # a backslash at the very end.
 # $1 The word
 # $2 Name of the variable to set
+# $3 Optional name of a variable to set to how the word ends, which is the
+#    quoting that the completion is to be written in: none, single, double
+#    or ansi
 function _lsm_unescape()
 {
     local _lsm_in="$1"
     local _lsm_out=''
     local _lsm_state=none
     local _lsm_len=${#_lsm_in}
-    local _lsm_c _lsm_next _lsm_digits _lsm_i
+    local _lsm_c _lsm_next _lsm_i _lsm_j _lsm_piece
 
     for (( _lsm_i = 0; _lsm_i < _lsm_len; _lsm_i++ )) ; do
         _lsm_c="${_lsm_in:_lsm_i:1}"
@@ -102,8 +222,19 @@ function _lsm_unescape()
                 '"') _lsm_state=double ;;
                 '$')
                     if [[ ${_lsm_next} == "'" ]] ; then
-                        _lsm_state=ansi
-                        (( ++_lsm_i ))
+                        # Find the closing quote before decoding anything.
+                        for (( _lsm_j = _lsm_i + 2; _lsm_j < _lsm_len; _lsm_j++ )) ; do
+                            case "${_lsm_in:_lsm_j:1}" in
+                                '\') (( ++_lsm_j )) ;;
+                                "'") break ;;
+                            esac
+                        done
+                        (( _lsm_j > _lsm_len )) && _lsm_j=${_lsm_len}
+                        _lsm_ansi_c "${_lsm_in:_lsm_i+2:_lsm_j-_lsm_i-2}" _lsm_piece
+                        _lsm_out+="${_lsm_piece}"
+                        # Left open, this is the word being completed.
+                        (( _lsm_j >= _lsm_len )) && _lsm_state=ansi
+                        _lsm_i=${_lsm_j}
                     else
                         _lsm_out+='$'
                     fi
@@ -133,51 +264,10 @@ function _lsm_unescape()
                 *) _lsm_out+="${_lsm_c}" ;;
             esac
             ;;
-        ansi)
-            case "${_lsm_c}" in
-                "'") _lsm_state=none ;;
-                '\')
-                    case "${_lsm_next}" in
-                        a) _lsm_out+=$'\a' ; (( ++_lsm_i )) ;;
-                        b) _lsm_out+=$'\b' ; (( ++_lsm_i )) ;;
-                        e|E) _lsm_out+=$'\e' ; (( ++_lsm_i )) ;;
-                        f) _lsm_out+=$'\f' ; (( ++_lsm_i )) ;;
-                        n) _lsm_out+=$'\n' ; (( ++_lsm_i )) ;;
-                        r) _lsm_out+=$'\r' ; (( ++_lsm_i )) ;;
-                        t) _lsm_out+=$'\t' ; (( ++_lsm_i )) ;;
-                        v) _lsm_out+=$'\v' ; (( ++_lsm_i )) ;;
-                        '\'|"'"|'"'|'?')
-                            _lsm_out+="${_lsm_next}"
-                            (( ++_lsm_i ))
-                            ;;
-                        x)
-                            _lsm_digits="${_lsm_in:_lsm_i+2:2}"
-                            _lsm_digits="${_lsm_digits%%[!0-9a-fA-F]*}"
-                            if [[ -n ${_lsm_digits} ]] ; then
-                                # Only hex digits get into the format here.
-                                printf -v _lsm_c "\\x${_lsm_digits}"
-                                _lsm_out+="${_lsm_c}"
-                                (( _lsm_i += 1 + ${#_lsm_digits} ))
-                            else
-                                _lsm_out+='\'
-                            fi
-                            ;;
-                        [0-7])
-                            _lsm_digits="${_lsm_in:_lsm_i+1:3}"
-                            _lsm_digits="${_lsm_digits%%[!0-7]*}"
-                            printf -v _lsm_c "\\${_lsm_digits}"
-                            _lsm_out+="${_lsm_c}"
-                            (( _lsm_i += ${#_lsm_digits} ))
-                            ;;
-                        *) _lsm_out+='\' ;;
-                    esac
-                    ;;
-                *) _lsm_out+="${_lsm_c}" ;;
-            esac
-            ;;
         esac
     done
     printf -v "$2" '%s' "${_lsm_out}"
+    [[ -z ${3-} ]] || printf -v "$3" '%s' "${_lsm_state}"
 }
 
 # Get the value that follows a flag on the command line, for use as a filter.
@@ -222,7 +312,9 @@ function _lsm_values()
 
     COMPREPLY=()
     # ${_lsm_sep} is not white space, so read splits the line on it alone and
-    # values keep any spaces they contain. Errors from lsmcli go nowhere as
+    # values keep any spaces they contain. A value with a newline in it would
+    # be split in two records, as the output is read a line at a time, but
+    # the plugins have no such name to return. Errors from lsmcli go nowhere as
     # they would be written over the user's command line.
     while IFS="${_lsm_sep}" read -r -a _lsm_fields ; do
         if [[ ${_lsm_column} == all ]] ; then

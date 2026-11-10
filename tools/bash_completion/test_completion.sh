@@ -122,6 +122,9 @@ source "${completion_script}"
 
 failures=0
 
+# Every function the completion script defines, sorted as the C locale does.
+lsm_funcs='_lsm _lsm_ansi_c _lsm_arg_index _lsm_flag_value _lsm_join _lsm_listcontains _lsm_ordinal _lsm_possible_args _lsm_unescape _lsm_values'
+
 function fail()
 {
     echo "FAIL: $*"
@@ -359,6 +362,42 @@ for ag_at in 100 254 255 256 257 260 ; do
     check_stub_args yes "[--ag][ag-at-${ag_at}]" "--ag at ${ag_at} of 300 words"
 done
 
+# _lsm_join keeps a leading -n or -e, which echo would take for an option.
+# Data: separator|items, '/' separated
+for t in ' |-n/x' ' |-e/-E/y' ',|a/b/c' ' |one' ; do
+    IFS='|' read -r sep items <<< "${t}"
+    IFS=/ read -r -a join_items <<< "${items}"
+    expected_join="${join_items[*]}"
+    [[ ${sep} == ' ' ]] || expected_join="${items//\//${sep}}"
+    actual_join=$(_lsm_join "${sep}" "${join_items[@]}")
+    [[ ${actual_join} == "${expected_join}" ]] || \
+        fail "_lsm_join '${sep}' '${items}' gave [${actual_join}] not [${expected_join}]"
+done
+
+# An entry with a glob character in the possible arguments stays as it is, even
+# with files that match it. Data: possible|words on the line|left
+for t in '--a* --b?||--a* --b?' '--a* --b?|--b?|--a*' '--n* --size|--size|--n*' ; do
+    IFS='|' read -r possible words left <<< "${t}"
+    read -r -a line_words <<< "${words}"
+    COMP_WORDS=(lsmcli x ${line_words[@]+"${line_words[@]}"})
+    _lsm_possible_args "${possible}"
+    [[ ${_lsm_potential_args} == "${left}" ]] || \
+        fail "_lsm_possible_args '${possible}' with '${words}' gave [${_lsm_potential_args}] not [${left}]"
+done
+unset _lsm_potential_args
+
+# What the word \$'...' stands for has to be what bash itself makes of it, so
+# compare against bash for the bodies below. Only fixed test data is eval'd.
+ansi_bodies=('\cA' '\ca' '\cz' '\c?' '\c@' '\c[' '\c\\' '\c\\\\' '\c1' '\c ' 'a\cAb' '\c'
+             'x\c' '\u00e9' '\u20ac' '\U0001F600' '\u' '\uZ' '\u12345' '\U1' '\ux' '\u41b'
+             '\U000041' '\u0' '\x41' '\x4' '\x' '\101' '\0' '\18' '\n\t' "\\'" '\q' '\')
+for body in "${ansi_bodies[@]}" ; do
+    _lsm_unescape "\$'${body}'" mine
+    eval "real=\$'${body}'" 2> /dev/null || continue
+    [[ ${mine} == "${real}" ]] || \
+        fail "\$'${body}' read as $(printf '%q' "${mine}"), bash reads $(printf '%q' "${real}")"
+done
+
 # Nothing above may have run the payload.
 if [[ -e ${LSM_TEST_MARKER} ]] ; then
     fail "completion evaluated a returned value"
@@ -415,8 +454,7 @@ leaked=$(env LC_ALL=C LSMCLI_AUTO_COMPLETE_VALUE=1 bash --noprofile --norc -c '
     echo "funcs: $(comm -13 <(echo "${before_funcs}") \
                    <(compgen -A function | sort) | tr "\n" " ")"' \
     _ "${completion_script}" 2>&1)
-printf -v expected_leaked '%s\n%s' 'vars: ' \
-    'funcs: _lsm _lsm_arg_index _lsm_flag_value _lsm_join _lsm_listcontains _lsm_possible_args _lsm_unescape _lsm_values '
+printf -v expected_leaked '%s\n%s' 'vars: ' "funcs: ${lsm_funcs} "
 if [[ ${leaked} != "${expected_leaked}" ]] ; then
     fail "completion left things behind:"
     echo "expected: ${expected_leaked}"
@@ -482,9 +520,9 @@ leaks=$(env LSMCLI_AUTO_COMPLETE_VALUE=1 bash --noprofile --norc -c '
     echo "join=$(join)"
     echo "vars=${i} ${word} ${count} ${sep} ${index} ${value} ${item} ${plain} ${potential_args} ${cur} ${prev}"
     declare -F | sed "s/^declare -f //" | LC_ALL=C sort | tr "\n" " "' _ "${completion_script}")
-expected_leaks='join=user-join
+expected_leaks="join=user-join
 vars=I W C S X V T P PA C2 P2
-_lsm _lsm_arg_index _lsm_flag_value _lsm_join _lsm_listcontains _lsm_possible_args _lsm_unescape _lsm_values join '
+${lsm_funcs} join "
 if [[ ${leaks} != "${expected_leaks}" ]] ; then
     fail "user's functions or variables disturbed:"
     echo "expected: ${expected_leaks}"
