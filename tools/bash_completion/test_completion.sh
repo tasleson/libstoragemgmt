@@ -498,6 +498,76 @@ for t in "${repeat_tests[@]}" ; do
     check "${comp_line}" "${cur}" "${expected}"
 done
 
+# Values with a fixed set of choices. --rep-type, --policy and the rest depend
+# on the sub command, as the choices of cmdline.py do.
+#
+# Command line | word | expected completions
+enum_tests=(
+    "lsmcli volume-replicate --rep-type||CLONE|COPY|MIRROR_ASYNC|MIRROR_SYNC"
+    "lsmcli volume-replicate --rep-type|M|MIRROR_ASYNC|MIRROR_SYNC"
+    "lsmcli volume-replicate-range --rep-type||CLONE|COPY"
+    "lsmcli volume-replicate-range --rep-type|M|"
+    "lsmcli -u sim : // volume-replicate-range --rep-type||CLONE|COPY"
+    "lsmcli volume-phy-disk-cache-update --policy||ENABLE|DISABLE"
+    "lsmcli vpdcu --vol v --policy|E|ENABLE"
+    "lsmcli volume-read-cache-policy-update --policy||ENABLE|DISABLE"
+    "lsmcli vrcpu --policy|D|DISABLE"
+    "lsmcli volume-write-cache-policy-update --policy||WB|AUTO|WT"
+    "lsmcli vwcpu --policy|W|WB|WT"
+    "lsmcli vwcpu --policy|E|"
+    "lsmcli vrcpu --policy|W|"
+    "lsmcli x --policy||"
+    "lsmcli volume-raid-create --raid-type||RAID0|RAID1|RAID5|RAID6|RAID10|RAID50|RAID60"
+    "lsmcli vrc --raid-type|RAID1|RAID1|RAID10"
+    "lsmcli volume-create --provisioning||DEFAULT|THIN|FULL"
+    "lsmcli vc --provisioning|T|THIN"
+    "lsmcli local-led-slot-set --state||IDENT_ON|IDENT_OFF|FAULT_ON|FAULT_OFF"
+    "lsmcli local-led-slot-set --slot s --state|F|FAULT_ON|FAULT_OFF"
+)
+for t in "${enum_tests[@]}" ; do
+    IFS='|' read -r comp_line cur expected_head rest <<< "${t}"
+    expected="${expected_head}"
+    [[ -n ${rest} ]] && expected="${expected_head}|${rest}"
+    check "${comp_line}" "${cur}" "${expected}"
+    # None of these is looked up.
+    [[ -e ${LSM_TEST_ARGV} ]] && fail "'${comp_line}' ran lsmcli"
+done
+
+# Values that are free form, which nothing can be offered for, with a word
+# that matches a file as well as with none.
+for flag in --size --count --src-start --dst-start --name --in-user --in-pass \
+            --out-user --out-pass --exportpath --anonuid --anongid \
+            --root-host --ro-host --rw-host --dst-name --file --fileas --src \
+            --dst --job --strip-size --read-pct --path --slot ; do
+    for cur in '' 'a' 'a*' '--n*' ; do
+        check_end "" lsmcli x "${flag}" "${cur}"
+        [[ -e ${LSM_TEST_ARGV} ]] && fail "${flag} ran lsmcli"
+    done
+done
+
+# --backing-snapshot completes the snapshots of the file system given with
+# --fs, or --src-fs for fs-clone, as --snap does, and with no file system there
+# is nothing to offer and lsmcli is not run. With look-ups off it is not run
+# either.
+check_end "${PAYLOAD_ESC}|snap-one" lsmcli file-clone --fs fs-one --backing-snapshot ""
+check_stub_args yes "[--fs][fs-one]" "file-clone --backing-snapshot"
+check_end "snap-one" lsmcli file-clone --fs 'fs\ one' --backing-snapshot "s"
+check_stub_args yes "[--fs][fs one]" "file-clone --backing-snapshot, escaped --fs"
+check_end "${PAYLOAD_ESC}|snap-one" lsmcli fs-clone --src-fs fs-one --dst-name n --backing-snapshot ""
+check_stub_args yes "[--fs][fs-one]" "fs-clone --backing-snapshot"
+check_end "snap-one" lsmcli -u sim : // fs-clone --src-fs fs-one --backing-snapshot "s"
+check_stub_args yes "[-u][sim://]" "fs-clone --backing-snapshot"
+check_end "" lsmcli file-clone --src a --backing-snapshot ""
+[[ -e ${LSM_TEST_ARGV} ]] && fail "--backing-snapshot with no file system ran lsmcli"
+check_end "" lsmcli file-clone --fs "" --backing-snapshot ""
+[[ -e ${LSM_TEST_ARGV} ]] && fail "--backing-snapshot with an empty --fs ran lsmcli"
+check_end "" lsmcli fs-clone --src-fs --backing-snapshot ""
+[[ -e ${LSM_TEST_ARGV} ]] && fail "--backing-snapshot with a --src-fs of no value ran lsmcli"
+LSMCLI_AUTO_COMPLETE_VALUE=0
+check_end "" lsmcli file-clone --fs fs-one --backing-snapshot ""
+[[ -e ${LSM_TEST_ARGV} ]] && fail "--backing-snapshot with look-ups off ran lsmcli"
+LSMCLI_AUTO_COMPLETE_VALUE=1
+
 # The first word, and the last of a line that is all there is.
 check_words "" 0 lsmcli
 check_words "" 0 ""

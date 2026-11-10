@@ -529,7 +529,8 @@ function _lsm()
     local _lsm_opts_long _lsm_opts_cmds _lsm_list_type_args
     local _lsm_ag_value _lsm_fs_value _lsm_list_filter_args _lsm_args
     local _lsm_repeat _lsm_cmd _lsm_in_value _lsm_uri _lsm_uri_state
-    local _lsm_volume_rep_types
+    local _lsm_rep_types _lsm_range_rep_types _lsm_policies _lsm_write_policies
+    local _lsm_raid_types _lsm_provisioning_types _lsm_led_states
 
     # The ASCII unit separator, made for this and not something a name has in
     # it, unlike '#' or ' ', which split a value in two.
@@ -574,7 +575,14 @@ function _lsm()
     _lsm_list_type_args="volumes pools fs snapshots exports nfs_client_auth \
                     access_groups systems disks plugins target_ports \
                     batteries"
-    _lsm_volume_rep_types="CLONE COPY MIRROR_ASYNC MIRROR_SYNC"
+    # The choices of cmdline.py, which test_cmdline_drift.sh compares with.
+    _lsm_rep_types="CLONE COPY MIRROR_ASYNC MIRROR_SYNC"
+    _lsm_range_rep_types="CLONE COPY"
+    _lsm_policies="ENABLE DISABLE"
+    _lsm_write_policies="WB AUTO WT"
+    _lsm_raid_types="RAID0 RAID1 RAID5 RAID6 RAID10 RAID50 RAID60"
+    _lsm_provisioning_types="DEFAULT THIN FULL"
+    _lsm_led_states="IDENT_ON IDENT_OFF FAULT_ON FAULT_OFF"
 
     # These operations can potentially be slow and cause hangs depending on plugin and configuration
     if [[ ${LSMCLI_AUTO_COMPLETE_VALUE:-0} == 1 ]] ; then
@@ -635,6 +643,17 @@ function _lsm()
                 fi
                 return 0
                 ;;
+            --backing-snapshot)
+                # Snapshots of the file system, the one given as --fs for
+                # file-clone and as --src-fs for fs-clone.
+                if _lsm_flag_value "--fs" _lsm_fs_value || \
+                        _lsm_flag_value "--src-fs" _lsm_fs_value ; then
+                    _lsm_values snapshots 1 --fs "${_lsm_fs_value}"
+                else
+                    COMPREPLY=()
+                fi
+                return 0
+                ;;
             --auth-type)
                 _lsm_values nfs_client_auth all
                 return 0
@@ -651,14 +670,46 @@ function _lsm()
             return 0
             ;;
         --size|--count|--src-start|--dst-start|--name|--in-user|--in-pass|\
-            --out-user|--out-pass|--exportpath|--anonuid|--root-host|--ro-host|\
-            --rw-host|--dst-name|--file|--fileas|--src|--dst)
-            # These we cannot lookup, so don't offer any values
+            --out-user|--out-pass|--exportpath|--anonuid|--anongid|\
+            --root-host|--ro-host|--rw-host|--dst-name|--file|--fileas|--src|\
+            --dst|--job|--strip-size|--read-pct|--path|--slot|\
+            --backing-snapshot)
+            # These we cannot lookup, so don't offer any values. That is also
+            # --backing-snapshot when look-ups are off.
             COMPREPLY=( $(compgen -W "" -- "${_lsm_cur}") )
             return 0
             ;;
         --rep-type)
-            COMPREPLY=( $(compgen -W "${_lsm_volume_rep_types}" -- "${_lsm_cur}") )
+            # What volume-replicate-range takes is less than volume-replicate.
+            if [[ ${_lsm_cmd} == volume-replicate-range ]] ; then
+                COMPREPLY=( $(compgen -W "${_lsm_range_rep_types}" -- "${_lsm_cur}") )
+            else
+                COMPREPLY=( $(compgen -W "${_lsm_rep_types}" -- "${_lsm_cur}") )
+            fi
+            return 0
+            ;;
+        --policy)
+            case "${_lsm_cmd}" in
+                volume-phy-disk-cache-update|vpdcu|\
+                volume-read-cache-policy-update|vrcpu)
+                    COMPREPLY=( $(compgen -W "${_lsm_policies}" -- "${_lsm_cur}") )
+                    ;;
+                volume-write-cache-policy-update|vwcpu)
+                    COMPREPLY=( $(compgen -W "${_lsm_write_policies}" -- "${_lsm_cur}") )
+                    ;;
+            esac
+            return 0
+            ;;
+        --raid-type)
+            COMPREPLY=( $(compgen -W "${_lsm_raid_types}" -- "${_lsm_cur}") )
+            return 0
+            ;;
+        --provisioning)
+            COMPREPLY=( $(compgen -W "${_lsm_provisioning_types}" -- "${_lsm_cur}") )
+            return 0
+            ;;
+        --state)
+            COMPREPLY=( $(compgen -W "${_lsm_led_states}" -- "${_lsm_cur}") )
             return 0
             ;;
         *)
