@@ -159,7 +159,7 @@ function check_words()
         local i cursor_at
         COMP_LINE=''
         for (( i = 0; i < $#; i++ )) ; do
-            if (( i > 0 )) && [[ ${COMP_WORDS[i]} != [:=] && ${COMP_WORDS[i-1]} != [:=] ]] ; then
+            if (( i > 0 )) && [[ ${COMP_WORDS[i]} != [:=\<\>] && ${COMP_WORDS[i-1]} != [:=\<\>] ]] ; then
                 COMP_LINE+=' '
             fi
             COMP_LINE+="${COMP_WORDS[i]}"
@@ -921,6 +921,100 @@ test_line='LSMCLI_URI=sim://other lsmcli vd --vol '
 check_end "" lsmcli vd --vol ""
 [[ -e ${LSM_TEST_ARGV} ]] && fail "text before the command, but lsmcli was run"
 unset test_line
+
+# Words that the shell expands, or that start a comment, can be an option, or
+# take one off the line, so a line with one is not known and there is no
+# look-up, whatever the cursor is after. The same quoted, or with the sign
+# inside a word, is fine. O is '-u sim://z' in the shell that was asked.
+# Words, @ for the cursor | whether there is a look-up
+expansion_line_tests=(
+    'vd $O --vol @|-'
+    '$O vd --vol @|-'
+    '${O} vd --vol @|-'
+    '$P$Q vd --vol @|-'
+    '`echo vd --vol @|-'
+    '{-u,sim : //z} vd --vol @|-'
+    '$O aa --ag a --init @|-'
+    'vd a* --vol @|-'
+    'vd a?b --vol @|-'
+    'vd [ab] --vol @|-'
+    'vd ~ --vol @|-'
+    'vd !x --vol @|-'
+    'vd @(a|b) --vol @|-'
+    "vd '\$O' --vol @|yes"
+    'vd "$O" --vol @|-'
+    "vd 'a*' --vol @|yes"
+    'vd a\*b --vol @|yes'
+    'vd a~ --vol @|yes'
+    'vd a\$O --vol @|yes'
+    'vd # -u sim : //b --vol @|-'
+    '# -u sim : //b vd --vol @|-'
+    'vd -u sim : //a#b --vol @|yes'
+    'vd a#b --vol @|yes'
+)
+for t in "${expansion_line_tests[@]}" ; do
+    IFS='|' read -r words used <<< "${t}"
+    read -r -a line_words <<< "lsmcli ${words}"
+    cword=0
+    for (( n = 0; n < ${#line_words[@]}; n++ )) ; do
+        if [[ ${line_words[n]} == @ ]] ; then
+            line_words[n]=''
+            cword=${n}
+        fi
+    done
+    if [[ ${used} == yes ]] ; then
+        check_words "${PAYLOAD_ESC}|vol-one" "${cword}" "${line_words[@]}"
+    else
+        check_words "" "${cword}" "${line_words[@]}"
+        [[ -e ${LSM_TEST_ARGV} ]] && fail "'${words}' ran lsmcli"
+    fi
+done
+
+# A comment, as recorded from bash: # stays a word, and the cursor word is the
+# # itself when the cursor is at it. A word with the # inside is one word.
+# COMP_WORDS | COMP_CWORD | COMP_POINT | COMP_LINE | look-up
+comment_tests=(
+    "lsmcli vd # -u sim : //b --vol @|8|29|lsmcli vd # -u sim://b --vol |no"
+    "lsmcli vd --vol # -u sim : //b|3|17|lsmcli vd --vol  # -u sim://b|no"
+    "lsmcli # -u sim : //b vd --vol @|8|29|lsmcli # -u sim://b vd --vol |no"
+    "lsmcli vd --vol #x|3|16|lsmcli vd --vol #x|no"
+    "lsmcli vd -u sim : //a#b --vol @|7|29|lsmcli vd -u sim://a#b --vol |yes"
+)
+for t in "${comment_tests[@]}" ; do
+    IFS='|' read -r words cword point line used <<< "${t}"
+    read -r -a line_words <<< "${words}"
+    for (( n = 0; n < ${#line_words[@]}; n++ )) ; do
+        [[ ${line_words[n]} == @ ]] && line_words[n]=''
+    done
+    test_line="${line}"
+    test_point="${point}"
+    if [[ ${used} == yes ]] ; then
+        check_words "${PAYLOAD_ESC}|vol-one" "${cword}" "${line_words[@]}"
+        check_stub_args yes "[-u][sim://a#b]" "${line}"
+    else
+        check_words "" "${cword}" "${line_words[@]}"
+        [[ -e ${LSM_TEST_ARGV} ]] && fail "'${line}' ran lsmcli"
+    fi
+done
+unset test_line test_point
+
+# What is not a value still completes on a line like that, as well as it can:
+# the sub command is the first word that is not an option, so after a
+# redirection that is the file, but one after the sub command is fine.
+# Words | word | expected, with the line as it was typed
+operator_option_tests=(
+    "lsmcli -u sim : //a > out vd|--v|--vol"
+    "lsmcli -u a > o fs-export|--anon|--anonuid|--anongid"
+    "lsmcli volume-replicate-range -u sim : //a > out --rep-type||CLONE|COPY"
+    "lsmcli vpdcu -u a > o --policy||ENABLE|DISABLE"
+    "lsmcli vwcpu 2 > /dev/null --policy||WB|AUTO|WT"
+)
+for t in "${operator_option_tests[@]}" ; do
+    IFS='|' read -r comp_line cur expected_head rest <<< "${t}"
+    expected="${expected_head}"
+    [[ -n ${rest} ]] && expected="${expected_head}|${rest}"
+    check "${comp_line}" "${cur}" "${expected}"
+done
 
 # What the line looks like to bash for the commands that come before, which
 # is nothing: bash takes those and the variable assignments off. Recorded.

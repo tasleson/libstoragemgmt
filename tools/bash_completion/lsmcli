@@ -355,15 +355,14 @@ function _lsm_escape()
 
 # Would the shell, reading a word, do more than take it for what it says. That
 # is an operator, < > | & ; ( ) anywhere that is not quoted or escaped, as what
-# follows is a file or another command and not an argument; and unless only
-# operators are asked for, something that depends on what is in the shell or on
-# disk: a variable, a command substitution, a ~, a glob, a brace expansion, or
-# in an interactive shell a history reference. Nothing is expanded or evaluated
-# here. Quotes and backslashes are read as _lsm_unescape does: single quotes
-# and $'...' protect all of it, double quotes all but $, a backtick and !. It
-# is conservative, as a ! or { that would have been left alone counts too.
+# follows is a file or another command and not an argument, and something that
+# depends on what is in the shell or on disk: a variable, a command
+# substitution, a ~, a glob, a brace expansion, or in an interactive shell a
+# history reference. Nothing is expanded or evaluated here. Quotes and
+# backslashes are read as _lsm_unescape does: single quotes and $'...' protect
+# all of it, double quotes all but $, a backtick and !. It is conservative, as a
+# ! or { that would have been left alone counts too.
 # $1 The word
-# $2 Not empty for operators only
 # Returns 0 if it would.
 function _lsm_expands()
 {
@@ -380,17 +379,16 @@ function _lsm_expands()
                 '\') (( ++_lsm_i )) ;;
                 "'") _lsm_state=single ;;
                 '"') _lsm_state=double ;;
-                '<'|'>'|'|'|'&'|';'|'('|')') return 0 ;;
                 '$')
                     if [[ ${_lsm_in:_lsm_i+1:1} == "'" ]] ; then
                         _lsm_state=ansi
                         (( ++_lsm_i ))
                     else
-                        [[ -n ${2-} ]] || return 0
+                        return 0
                     fi
                     ;;
-                '`'|'*'|'?'|'['|'{'|'!') [[ -n ${2-} ]] || return 0 ;;
-                '~') [[ -n ${2-} || ${_lsm_i} -ne 0 ]] || return 0 ;;
+                '<'|'>'|'|'|'&'|';'|'('|')'|'`'|'*'|'?'|'['|'{'|'!') return 0 ;;
+                '~') [[ ${_lsm_i} -ne 0 ]] || return 0 ;;
             esac
             ;;
         single)
@@ -406,7 +404,7 @@ function _lsm_expands()
             case "${_lsm_c}" in
                 '\') (( ++_lsm_i )) ;;
                 '"') _lsm_state=none ;;
-                '$'|'`'|'!') [[ -n ${2-} ]] || return 0 ;;
+                '$'|'`'|'!') return 0 ;;
             esac
             ;;
         esac
@@ -422,10 +420,16 @@ function _lsm_expands()
 # was typed is only trusted if the words are found in COMP_LINE one after the
 # other, else nothing is known about the layout and nothing that needs it is
 # to be relied on.
-# That is also where the line is checked to be the words and nothing else:
-# there is no text before the first word, as an assignment of a variable
-# would be, and no word has an operator, see _lsm_expands, as that is a
-# redirection or a command that is not part of this one.
+#
+# That is also where the line is checked to be the words and nothing else, so
+# that what is passed to lsmcli is what they say: there is no text before the
+# first word, as an assignment of a variable would be, and no word is one that
+# the shell expands or that is an operator, see _lsm_expands, as an expansion
+# can be more words, including an option, and an operator is a redirection or
+# a command that is not part of this one, and no word starts a comment with
+# a #. The word being completed is only part of a word, so it is not looked
+# at. The layout is still worked out for such a line, for the completion of
+# what is not a value, which only has to do its best.
 # Sets, as variables of the caller, which is _lsm_complete:
 #   _lsm_glue[i]      1 if word i follows word i-1 with no white space
 #   _lsm_layout_ok    0 if the line is not what the words say, in which case
@@ -463,15 +467,13 @@ function _lsm_layout()
             _lsm_layout_ok=0
             return 0
         fi
-        # A redirection or the like on the line, whose operand would be taken
-        # for a word, and what is passed is not what the words say. The word
-        # being completed is only part of a word, so it is not looked at.
-        if [[ ${_lsm_i} != "${COMP_CWORD-}" ]] && _lsm_expands "${_lsm_w}" ops ; then
-            _lsm_layout_ok=0
-            return 0
-        fi
         if (( _lsm_i > 0 && _lsm_start == _lsm_end )) ; then
             _lsm_glue[_lsm_i]=1
+        fi
+        if [[ ${_lsm_i} != "${COMP_CWORD-}" ]] && \
+                { _lsm_expands "${_lsm_w}" || \
+                  [[ ${_lsm_w} == '#'* && ${_lsm_glue[_lsm_i]} == 0 ]] ; } ; then
+            _lsm_layout_ok=0
         fi
         _lsm_pos=$(( _lsm_start + ${#_lsm_w} ))
         _lsm_end=${_lsm_pos}
@@ -762,7 +764,7 @@ function _lsm_values()
     # An option where the value is to be is not a value, and what lsmcli would
     # make of the line is not known, eg. when it is a -u that is the word at
     # the cursor.
-    [[ ${_lsm_cur} != -* ]] || return 0
+    [[ ${_lsm_cur} != -* && ${_lsm_cur} != '#'* ]] || return 0
     # The line is not known to be what the words say, or the URI is not.
     (( _lsm_layout_ok )) || return 0
     [[ ${_lsm_uri_state} != bad ]] || return 0
