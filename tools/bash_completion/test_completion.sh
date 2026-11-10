@@ -379,7 +379,7 @@ for state in none double single ansi ; do
         ansi) before="\$'" ; after="'" ;;
     esac
     for name in 'sys three' "it's" 'a"q' '$x' '`x`' 'back\slash' 'a\\b' $'t\tb' \
-                $'n\nl' '*' 'a&b' '!x' '' ; do
+                $'n\nl' '*' 'a&b' '!x' 'a!b!' '' ; do
         _lsm_escape "${name}" "${state}" offered
         eval "read_back=${before}${offered}${after}" 2> /dev/null
         [[ ${read_back} == "${name}" ]] || \
@@ -387,6 +387,15 @@ for state in none double single ansi ; do
                  "which reads back as $(printf '%q' "${read_back}")"
     done
 done
+
+# History expansion is on for a word in double quotes, so a ! is not left in
+# one: it is closed, quoted in single quotes, and opened again.
+dq='"' sq="'"
+want="a${dq}${sq}!${sq}${dq}b${dq}${sq}!${sq}${dq}"
+_lsm_escape 'a!b!' double offered
+[[ ${offered} == "${want}" ]] || fail "! in double quotes offered as ${offered}"
+_lsm_escape 'a!b' none offered
+[[ ${offered} == 'a\!b' ]] || fail "! without quotes offered as ${offered}"
 
 # The quote a word leaves open, and how much of the value came before it.
 # Word | state | characters before

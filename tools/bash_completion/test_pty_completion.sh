@@ -41,7 +41,7 @@ sep=''
 for arg in "$@" ; do
     case "${arg}" in -t?*) sep="${arg#-t}" ;; esac
 done
-for name in 'my vol' 'a"q' "it's" '$x' 'back\slash' $'t\tb' plain1 ; do
+for name in 'my vol' 'a"q' "it's" '$x' 'back\slash' $'t\tb' plain1 'x!bogus' ; do
     printf '%s%sdesc\n' "${name}" "${sep}"
 done
 STUB
@@ -90,6 +90,11 @@ CASES = [
     ("t", "t\tb"),
     ('"t', "t\tb"),
     ("plain", "plain1"),
+    # ! is history expansion unless it is escaped or in single quotes.
+    ("x", "x!bogus"),
+    ('"x', "x!bogus"),
+    ("'x", "x!bogus"),
+    ("$'x", "x!bogus"),
     # Closed and open parts in one word.
     ('my\\ "vo', "my vol"),
     ("my\\ 'vo", "my vol"),
@@ -134,6 +139,12 @@ def run_case(typed, meant):
         ok, seen = read_until(r"PROMPT> $")
         if ok is None:
             return "sourcing hung: %r" % seen
+        # History expansion is on in an interactive shell, and !bogus is what
+        # would be taken for this entry if a ! got through.
+        os.write(fd, b"set -H; history -s 'bogus entry'\n")
+        ok, seen = read_until(r"PROMPT> $")
+        if ok is None:
+            return "history setup hung: %r" % seen
         # Readline takes the TAB and the Enter after it in turn.
         os.write(fd, ("lsmcli volume-delete --vol " + typed + "\t\n").encode())
         ok, seen = read_until(r"\nEND\r?\n")

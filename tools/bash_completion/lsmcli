@@ -15,6 +15,9 @@
 # variable names of their own that could collide with the caller's either:
 # scratch variables are 'local', and results come back through a variable
 # whose name the caller passes in.
+#
+# Needs bash 4.0 or later, for ${var,,}, and 4.2 for printf to know \u and \U
+# as $'...' in a word typed with one.
 
 # Join the arguments with a separator. printf, as echo would take a leading
 # -n or -e for an option.
@@ -299,7 +302,7 @@ function _lsm_unescape()
 # itself, so what is needed depends on the quote:
 #   none    backslash escapes, as printf %q has them
 #   double  a backslash in front of \ " $ and `, and nothing else, as inside
-#           a backslash escapes only those
+#           a backslash escapes only those, and a ! as "'!'" for history
 #   single  a ' ends the quote, so it is written as '\'' to carry on
 #   ansi    inside $'...', the body of what printf %q writes for a value
 #           with a tab or the like, else \ and ' behind a backslash
@@ -317,6 +320,11 @@ function _lsm_escape()
             _lsm_v="${_lsm_v//"${_lsm_dq}"/"${_lsm_bs}${_lsm_dq}"}"
             _lsm_v="${_lsm_v//"${_lsm_dollar}"/"${_lsm_bs}${_lsm_dollar}"}"
             _lsm_v="${_lsm_v//"${_lsm_bq}"/"${_lsm_bs}${_lsm_bq}"}"
+            # History expansion goes on in double quotes, and a backslash does
+            # not stop it there without staying in the word, so the ! is
+            # put in single quotes, between the end of the double quote and
+            # the start of another, which is what readline adds at the end.
+            _lsm_v="${_lsm_v//!/"${_lsm_dq}${_lsm_sq}!${_lsm_sq}${_lsm_dq}"}"
             ;;
         single)
             _lsm_v="${_lsm_v//"${_lsm_sq}"/"${_lsm_sq}${_lsm_bs}${_lsm_sq}${_lsm_sq}"}"
