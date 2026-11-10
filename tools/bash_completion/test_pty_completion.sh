@@ -39,8 +39,9 @@ if [[ ${1-} != list ]] ; then
 fi
 # A look-up that hangs, until it is interrupted. The file tells that it is.
 if [[ -n ${LSM_PTY_HANG-} ]] ; then
+    echo $$ > "${LSM_PTY_HANG}.pid"
     : > "${LSM_PTY_HANG}"
-    sleep 60
+    exec sleep 60
 fi
 sep=''
 for arg in "$@" ; do
@@ -170,6 +171,15 @@ def run_case(typed, meant):
         os.close(fd)
 
 
+def alive(pid):
+    """Is there a process, not counting one that is only waiting to be reaped."""
+    try:
+        with open("/proc/%d/stat" % pid) as handle:
+            return handle.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
+        return False
+
+
 def run_interrupted():
     """A completion that is interrupted leaves the shell as it was."""
     hang = os.path.join(os.environ["LSM_PTY_DIR"], "hanging")
@@ -223,6 +233,15 @@ def run_interrupted():
             return "nocasematch was not on after Ctrl-C: %r" % seen
         if not re.search(r"VARS=0\r?\n", seen):
             return "variables left after Ctrl-C: %r" % seen
+        # The look-up that was running is not left running.
+        end = time.time() + 5
+        with open(hang + ".pid") as handle:
+            child = int(handle.read())
+        while alive(child) and time.time() < end:
+            time.sleep(0.05)
+        if alive(child):
+            os.kill(child, signal.SIGKILL)
+            return "the look-up (%d) is still running" % child
         return None
     finally:
         try:

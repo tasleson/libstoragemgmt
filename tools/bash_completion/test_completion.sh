@@ -909,13 +909,110 @@ test_line='lsmcli -u a : b vd --name a:b --vol '
 check_end "${PAYLOAD_ESC}|vol-one" lsmcli -u a : b vd --name a : b --vol ""
 check_stub_args yes "[-u][a]" "-u a : b"
 unset test_line
-# Words that are not in the line say nothing is known, and a look-up for the
-# URI that is on it is then not to be made. A line with no URI is as it was.
+# Words that are not in the line say nothing is known, and then there is no
+# look-up: not for the URI that may be on it, and not for the default one,
+# which an assignment before the command, if bash shows it, may be for.
 test_line='something else'
-check_end "${PAYLOAD_ESC}|vol-one" lsmcli vd --vol ""
-check_stub_args no "[-u]" "no URI, layout not known"
+check_end "" lsmcli vd --vol ""
+[[ -e ${LSM_TEST_ARGV} ]] && fail "layout not known, but lsmcli was run"
 check_end "" lsmcli -u sim vd --vol ""
 [[ -e ${LSM_TEST_ARGV} ]] && fail "-u with the layout not known, but lsmcli was run"
+test_line='LSMCLI_URI=sim://other lsmcli vd --vol '
+check_end "" lsmcli vd --vol ""
+[[ -e ${LSM_TEST_ARGV} ]] && fail "text before the command, but lsmcli was run"
+unset test_line
+
+# What the line looks like to bash for the commands that come before, which
+# is nothing: bash takes those and the variable assignments off. Recorded.
+test_line='lsmcli -u sim://a vd --vol '
+check_words "${PAYLOAD_ESC}|vol-one" 7 lsmcli -u sim : //a vd --vol ""
+check_stub_args yes "[-u][sim://a]" "after cd /x &&"
+unset test_line
+
+# Short options in one word, as argparse reads them: the ones without a value
+# and then one with, whose value is the rest of the word or the next. Lines as
+# recorded from bash, and the URI that lsmcli would use.
+# Words | URI used, or - for no look-up
+cluster_tests=(
+    "-Hbu sim://a vd --vol @|sim://a"
+    "-Hbusim : //a vd --vol @|sim://a"
+    "-Hbusim://a vd --vol @|sim://a"
+    "vd -Hbu sim://a --vol @|sim://a"
+    "-Hbt , -u sim://a vd -u sim://b --vol @|sim://a"
+    "-Hbw 5 -u sim://a vd -u sim://b --vol @|sim://a"
+    "-Hbt, -u sim://a vd -u sim://b --vol @|sim://a"
+    "-Hb -u sim://a vd --vol @|sim://a"
+    "-uH vd --vol @|H"
+    "-Hbu vd --vol @|-"
+    "-Hbx -u sim://a vd --vol @|sim://a"
+    "-u sim://a -Hbx vd --vol @|-"
+    "-u sim://a vd --vol @ -vH|sim://a"
+    "vd --vol @ -u sim://a -vH|-"
+    "vd --vol @ -vH|-"
+    "-Hb vd --vol @|none"
+    "-H -b -s vd --vol @|none"
+)
+for t in "${cluster_tests[@]}" ; do
+    IFS='|' read -r words used <<< "${t}"
+    read -r -a line_words <<< "lsmcli ${words}"
+    # The words as bash gives them, split at : and =, where they were given
+    # as one in the table with the spaces.
+    cword=0
+    for (( n = 0; n < ${#line_words[@]}; n++ )) ; do
+        if [[ ${line_words[n]} == @ ]] ; then
+            line_words[n]=''
+            cword=${n}
+        fi
+    done
+    if [[ ${used} == - ]] ; then
+        check_words "" "${cword}" "${line_words[@]}"
+        [[ -e ${LSM_TEST_ARGV} ]] && fail "'${words}' ran lsmcli, the URI is not certain"
+    else
+        check_words "${PAYLOAD_ESC}|vol-one" "${cword}" "${line_words[@]}"
+        if [[ ${used} == none ]] ; then
+            check_stub_args no "[-u]" "'${words}'"
+        else
+            check_stub_args yes "[-u][${used}]" "'${words}'"
+        fi
+    fi
+done
+
+# Operators of the shell. bash splits the words there, so what follows is a
+# word on its own, and a redirection takes the next word, which is not an
+# argument. As recorded, all of them have no look-up, of values; the options
+# still complete.
+# COMP_WORDS (a space between words) | COMP_CWORD | COMP_LINE
+operator_tests=(
+    "lsmcli vd -u sim : //a > out --vol @|8|lsmcli vd -u sim://a>out --vol "
+    "lsmcli vd -u sim : //a < in --vol @|8|lsmcli vd -u sim://a<in --vol "
+    "lsmcli vd -u sim : //a) --vol @|6|lsmcli vd -u sim://a) --vol "
+    "lsmcli vd -u <( echo a) --vol @|6|lsmcli vd -u <(echo a) --vol "
+    "lsmcli > out -u sim : //a vd -u sim://b --vol @|9|lsmcli >out -u sim://a vd -u sim://b --vol "
+    "lsmcli 2 > /dev/null -u a vd -u b --vol @|9|lsmcli 2>/dev/null -u a vd -u b --vol "
+    "lsmcli aa --ag a > out --init @|6|lsmcli aa --ag a>out --init "
+    "lsmcli vd --vol x | cat --vol @|6|lsmcli vd --vol x | cat --vol "
+    "lsmcli vd --vol x & --vol @|5|lsmcli vd --vol x & --vol "
+    "lsmcli vd --vol x ; --vol @|5|lsmcli vd --vol x ; --vol "
+    "lsmcli -u @( sim://a) vd --vol @|6|lsmcli -u @(sim://a) vd --vol "
+    "lsmcli -u +( sim://a) vd --vol @|6|lsmcli -u +(sim://a) vd --vol "
+    "lsmcli -u !( sim://a) vd --vol @|6|lsmcli -u !(sim://a) vd --vol "
+)
+for t in "${operator_tests[@]}" ; do
+    IFS='|' read -r words cword line <<< "${t}"
+    read -r -a line_words <<< "${words}"
+    for (( n = 0; n < ${#line_words[@]}; n++ )) ; do
+        [[ ${line_words[n]} == @ ]] && line_words[n]=''
+    done
+    # What bash gives for ( glued to a word is the same words, see the
+    # recorded: <( echo is [<(][echo]. Only the shape matters here.
+    test_line="${line}"
+    check_words "" "$(( ${#line_words[@]} - 1 ))" "${line_words[@]}"
+    [[ -e ${LSM_TEST_ARGV} ]] && fail "'${line}' ran lsmcli"
+done
+unset test_line
+# The options and the enums are still completed on such a line.
+test_line='lsmcli vd -u sim://a>out '
+check_words "--vol|--force" 8 lsmcli vd -u sim : //a '>' out ""
 unset test_line
 
 # Filters read from the line are put back together too: bash splits foo:bar
@@ -1105,7 +1202,7 @@ for t in "${look_up_tests[@]}" ; do
         source "$1"
         eval "$2"
         COMP_WORDS=(lsmcli capabilities --sys "")
-        COMP_CWORD=3
+        COMP_CWORD=3 COMP_LINE="lsmcli capabilities --sys " COMP_POINT=26
         _lsm' _ "${completion_script}" "${export_cmd}"
     if [[ ${expect} == yes && ! -e ${LSM_TEST_CALLED} ]] ; then
         fail "lsmcli not run with look-up setting '${setting}' exported after sourcing"
@@ -1120,7 +1217,7 @@ env LSMCLI_AUTO_COMPLETE_VALUE=1 bash --noprofile --norc -c '
     source "$1"
     LSMCLI_AUTO_COMPLETE_VALUE=0
     COMP_WORDS=(lsmcli capabilities --sys "")
-    COMP_CWORD=3
+    COMP_CWORD=3 COMP_LINE="lsmcli capabilities --sys " COMP_POINT=26
     _lsm' _ "${completion_script}"
 [[ -e ${LSM_TEST_CALLED} ]] && fail "lsmcli run after the setting was changed to 0"
 
@@ -1183,6 +1280,7 @@ for name in "${read_only_names[@]}" ; do
         readonly "$2"
         source "$1"
         COMP_WORDS=(lsmcli capabilities --sys "sys-o") COMP_CWORD=3
+        COMP_LINE="lsmcli capabilities --sys sys-o" COMP_POINT=31
         _lsm
         echo "${COMPREPLY[*]}"
         COMP_WORDS=(lsmcli x --ag ag-one --init "") COMP_CWORD=5
@@ -1190,6 +1288,7 @@ for name in "${read_only_names[@]}" ; do
         _lsm
         echo "${COMPREPLY[*]}"
         COMP_WORDS=(lsmcli volume-create "--p") COMP_CWORD=2
+        COMP_LINE="lsmcli volume-create --p" COMP_POINT=24
         _lsm
         echo "${COMPREPLY[*]}"' _ "${completion_script}" "${name}" 2>&1)
     if [[ ${actual} != "${expected_readonly}" ]] ; then
