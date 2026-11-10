@@ -116,6 +116,8 @@ def run_case(typed, meant):
                PATH=os.environ["LSM_PTY_DIR"] + ":" + os.environ["PATH"])
     pid, fd = pty.fork()
     if pid == 0:
+        # Started as a background job, SIGINT is ignored and is inherited.
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
         os.execvpe("bash", ["bash", "--norc", "--noprofile", "-i"], env)
 
     def read_until(pattern):
@@ -188,6 +190,8 @@ def run_interrupted():
                PATH=os.environ["LSM_PTY_DIR"] + ":" + os.environ["PATH"])
     pid, fd = pty.fork()
     if pid == 0:
+        # Started as a background job, SIGINT is ignored and is inherited.
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
         os.execvpe("bash", ["bash", "--norc", "--noprofile", "-i"], env)
 
     def read_until(pattern):
