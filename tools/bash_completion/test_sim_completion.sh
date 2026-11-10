@@ -303,6 +303,27 @@ if [[ ${#COMPREPLY[@]} -ne 0 ]] ; then
     fail "--snap without a --fs offered: ${COMPREPLY[*]}"
 fi
 
+# --backing-snapshot takes the snapshots of the file system, --fs for
+# file-clone and --src-fs for fs-clone, and has none without one.
+for line in "lsmcli file-clone --fs ${fs_id} --backing-snapshot" \
+            "lsmcli fs-clone --src-fs ${fs_id} --backing-snapshot" ; do
+    complete_for "${line}" ""
+    if ! reply_contains "${snap_id}" ; then
+        fail "${line}: '${snap_id}' missing from: ${COMPREPLY[*]}"
+    fi
+done
+complete_for "lsmcli file-clone --backing-snapshot" ""
+if [[ ${#COMPREPLY[@]} -ne 0 ]] ; then
+    fail "--backing-snapshot without a file system offered: ${COMPREPLY[*]}"
+fi
+
+# A -u on the command line is passed on to the look-up, and the real lsmcli
+# takes it alongside the wrapper's own.
+complete_for "lsmcli -u sim:// volume-delete --vol" ""
+if ! reply_contains "${vol_id}" ; then
+    fail "--vol with -u sim:// : '${vol_id}' missing from: ${COMPREPLY[*]}"
+fi
+
 # A prefix narrows the result, and a prefix matching nothing gives nothing.
 complete_for "lsmcli x --vol" "${vol_id:0:3}"
 if ! reply_contains "${vol_id}" ; then
